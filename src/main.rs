@@ -1,19 +1,33 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![allow(static_mut_refs)]
+#![feature(ascii_char)]
+
 
 mod drivers;
 mod idt;
 mod gdt;
+mod util;
 use core::{arch::asm, panic::PanicInfo};
+use drivers::keyboard::set_keyboard_handler;
 pub use drivers::vga::*;
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     gdt::init_gdt();
+    set_keyboard_handler(|key| {
+        let s = key.to_string();
+        if let Some(c) = s {
+            print!("{}", c);
+        }
+    });
     idt::init_idt();
-    asm!("int 0x1");
+    idt::init_pic();
 
-    loop {}
+    x86_64::instructions::interrupts::enable();
+    loop {
+    }
+
 }
 
 
