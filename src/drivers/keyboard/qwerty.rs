@@ -1,4 +1,6 @@
-use super::{Key, KeyboardLayout, SpecialKey};
+use crate::println;
+
+use super::{Key, KeyEvent, KeyState, KeyboardLayout, SpecialKey};
 
 
 
@@ -16,7 +18,6 @@ pub const QWERTY_SCANCODE_TO_CHAR: [Option<char>; 256] = {
     map[0x0B] = Some('0');
     map[0x0C] = Some('-');
     map[0x0D] = Some('=');
-    map[0x0E] = Some('\x08');
     map[0x0F] = Some('\t');
     map[0x10] = Some('q');
     map[0x11] = Some('w');
@@ -61,19 +62,29 @@ pub const QWERTY_SCANCODE_TO_CHAR: [Option<char>; 256] = {
 pub struct Qwerty;
 
 impl KeyboardLayout for Qwerty {
-    fn from_scamcode(scancode: u8) -> Option<Key> {
+    fn from_scancode(scancode: u8) -> Option<KeyEvent> {
         if scancode == 0 {
             return None;
         }
 
+
         if let Some(c) = QWERTY_SCANCODE_TO_CHAR[scancode as usize] {
-            return Some(Key::Char(c));
+            return Some(KeyEvent::pressed(Key::Char(c)));
         }
 
-        match scancode {
+        let state = KeyState::from_scancode(scancode);
+        let scancode = if state == KeyState::Pressed {
+            scancode | 0x80
+        } else {
+            scancode
+        };
+
+
+        
+        let key = match scancode {
             0x1C => Some(Key::Special(SpecialKey::Enter)),
             0x39 => Some(Key::Special(SpecialKey::Space)),
-            0x0E => Some(Key::Special(SpecialKey::Backspace)),
+            0x8E => Some(Key::Special(SpecialKey::Backspace)),
             0x0F => Some(Key::Special(SpecialKey::Tab)),
             0x01 => Some(Key::Special(SpecialKey::Escape)),
             0x4B => Some(Key::Special(SpecialKey::Left)),
@@ -87,6 +98,16 @@ impl KeyboardLayout for Qwerty {
             0x52 => Some(Key::Special(SpecialKey::Insert)),
             0x53 => Some(Key::Special(SpecialKey::Delete)),
             _ => None,
+        };
+
+
+        if let Some(k) = key {
+            return Some(KeyEvent {
+                key: k,
+                state: state,
+            });
+        } else {
+            return None;
         }
     }
 }

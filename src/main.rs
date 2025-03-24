@@ -16,10 +16,8 @@ pub use drivers::vga::*;
 pub unsafe extern "C" fn _start() -> ! {
     gdt::init_gdt();
     set_keyboard_handler(|key| {
-        let s = key.to_string();
-        if let Some(c) = s {
-            print!("{}", c);
-        }
+
+        println!("{:?}", key);
     });
     idt::init_idt();
     idt::init_pic();

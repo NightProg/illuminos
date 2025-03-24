@@ -1,4 +1,4 @@
-use super::{Key, KeyboardLayout, SpecialKey};
+use super::{Key, KeyEvent, KeyState, KeyboardLayout, SpecialKey};
 
 
 
@@ -36,16 +36,16 @@ const AZERTY_SCANCODE_TO_CHAR: [Option<char>; 256] = {
 pub struct Azerty;
 
 impl KeyboardLayout for Azerty {
-    fn from_scamcode(scancode: u8) -> Option<Key> {
+    fn from_scancode(scancode: u8) -> Option<KeyEvent> {
         if scancode == 0 {
             return None;
         }
 
         if let Some(c) = AZERTY_SCANCODE_TO_CHAR[scancode as usize] {
-            return Some(Key::Char(c));
+            return Some(KeyEvent::pressed(Key::Char(c)));
         }
 
-        match scancode {
+        let key = match scancode {
             0x1C => Some(Key::Special(SpecialKey::Enter)),
             0x39 => Some(Key::Special(SpecialKey::Space)),
             0x0E => Some(Key::Special(SpecialKey::Backspace)),
@@ -74,6 +74,17 @@ impl KeyboardLayout for Azerty {
             0x57 => Some(Key::Special(SpecialKey::F11)),
             0x58 => Some(Key::Special(SpecialKey::F12)),
             _ => None,
+        };
+
+        let state = KeyState::from_scancode(scancode);
+
+        if let Some(k) = key {
+            Some(KeyEvent {
+                key: k,
+                state,
+            })
+        } else {
+            None
         }
     }
 }

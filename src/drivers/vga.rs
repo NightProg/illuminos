@@ -152,7 +152,7 @@ impl Writer {
                 color_code: self.color_code,
             };
             self.buffer.chars[row][col].write(blank);
-        }
+        } 
     }
 }
 

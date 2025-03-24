@@ -8,6 +8,51 @@ use lazy_static::lazy_static;
 use crate::WRITER;
 
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyState {
+    Pressed,
+    Released,
+}
+
+impl KeyState {
+    pub fn from_scancode(scancode: u8) -> KeyState {
+        if scancode & 0x80 != 0 {
+            KeyState::Released
+        } else {
+            KeyState::Pressed
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct KeyEvent {
+    pub key: Key,
+    pub state: KeyState,
+}
+
+impl KeyEvent {
+    pub fn pressed(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            state: KeyState::Pressed,
+        }
+    }
+
+    pub fn released(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            state: KeyState::Released,
+        }
+    }
+
+    pub fn from_scancode<T: KeyboardLayout>(scancode: u8) -> Option<KeyEvent> {
+        T::from_scancode(scancode)
+
+    }
+
+}
+
+
 #[derive(Debug, Clone, Copy)]
 pub enum Key {
     Char(char),
@@ -15,10 +60,6 @@ pub enum Key {
 }
 
 impl Key {
-    pub fn from_scancode<T: KeyboardLayout>(scancode: u8) -> Option<Key> {
-        T::from_scamcode(scancode)
-
-    }
 
     pub fn to_string(&self) -> Option<char> {
         match self {
@@ -81,7 +122,7 @@ pub enum SpecialKey {
 
 
 pub struct Keyboard {
-    pub handle_key: fn(Key),
+    pub handle_key: fn(KeyEvent),
 }
 
 impl Keyboard {
@@ -93,18 +134,18 @@ impl Keyboard {
         }
     }
 
-    pub fn read_key(&self) -> Option<Key> {
+    pub fn read_key(&self) -> Option<KeyEvent> {
         let scancode = self.read_scancode();
-        Key::from_scancode::<qwerty::Qwerty>(scancode)
+        KeyEvent::from_scancode::<qwerty::Qwerty>(scancode)
     }
 
-    pub fn new(key: fn(Key)) -> Keyboard {
+    pub fn new(key: fn(KeyEvent)) -> Keyboard {
         Keyboard {
             handle_key: key,
         }
     }
 
-    pub fn handle_key(&self, key: Key) {
+    pub fn handle_key(&self, key: KeyEvent) {
         (self.handle_key)(key);
     }
 }
@@ -114,13 +155,13 @@ lazy_static! {
     pub static ref KEYBOARD: Mutex<Keyboard> = Mutex::new(Keyboard::new(|_| {}));
 }
 
-pub fn set_keyboard_handler(handler: fn(Key)) {
+pub fn set_keyboard_handler(handler: fn(KeyEvent)) {
     KEYBOARD.lock().handle_key = handler;
 }
 
 
 pub trait KeyboardLayout {
-    fn from_scamcode(scancode: u8) -> Option<Key>;
+    fn from_scancode(scancode: u8) -> Option<KeyEvent>;
 }
 
 
