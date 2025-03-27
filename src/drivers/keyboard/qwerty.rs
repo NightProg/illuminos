@@ -68,9 +68,11 @@ impl KeyboardLayout for Qwerty {
         }
 
 
+
         if let Some(c) = QWERTY_SCANCODE_TO_CHAR[scancode as usize] {
             return Some(KeyEvent::pressed(Key::Char(c)));
         }
+
 
         let state = KeyState::from_scancode(scancode);
         let scancode = if state == KeyState::Pressed {
@@ -80,7 +82,6 @@ impl KeyboardLayout for Qwerty {
         };
 
 
-        
         let key = match scancode {
             0x1C => Some(Key::Special(SpecialKey::Enter)),
             0x39 => Some(Key::Special(SpecialKey::Space)),

@@ -9,7 +9,7 @@ lazy_static! {
     /// Used by the `print!` and `println!` macros.
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
         column_position: 0,
-        color_code: ColorCode::new(Color::Yellow, Color::Black),
+        color_code: ColorCode::new(Color::White, Color::Black),
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
     });
 }
@@ -40,12 +40,20 @@ pub enum Color {
 /// A combination of a foreground and a background color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-struct ColorCode(u8);
+pub struct ColorCode(u8);
 
 impl ColorCode {
     /// Create a new `ColorCode` with the given foreground and background colors.
     fn new(foreground: Color, background: Color) -> ColorCode {
         ColorCode((background as u8) << 4 | (foreground as u8))
+    }
+
+    pub fn background(&self) -> Color {
+        unsafe { core::mem::transmute((self.0 >> 4) & 0b1111) }
+    }
+
+    pub fn foreground(&self) -> Color {
+        unsafe { core::mem::transmute(self.0 & 0b1111) }
     }
 }
 
@@ -131,7 +139,6 @@ impl Writer {
         self.column_position = 0;
     }
 
-    /// Clears a row by overwriting it with blank characters.
     fn clear_row(&mut self, row: usize) {
         let blank = ScreenChar {
             ascii_character: b' ',
@@ -181,4 +188,13 @@ macro_rules! println {
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     WRITER.lock().write_fmt(args).unwrap();
+}
+
+
+pub fn set_color(foreground: Color, background: Color) {
+    WRITER.lock().color_code = ColorCode::new(foreground, background);
+}
+
+pub fn get_color() -> ColorCode {
+    WRITER.lock().color_code
 }
