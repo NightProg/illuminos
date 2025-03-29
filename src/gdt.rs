@@ -4,7 +4,7 @@ use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable};
 use x86_64::VirtAddr;
 use lazy_static::lazy_static;
 
-use crate::{info, println};
+use crate::{println};
 
 use x86_64::structures::tss::TaskStateSegment;
 
@@ -57,5 +57,4 @@ pub fn init_gdt() {
     unsafe { x86_64::instructions::tables::load_tss(GDT.1.tss_selector) };
 
 
-    info!("GDT initialized");
 }

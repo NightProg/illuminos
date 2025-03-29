@@ -8,7 +8,7 @@ use linked_list_allocator::LockedHeap;
 use spin::Mutex;
 use x86_64::{structures::paging::{FrameAllocator, OffsetPageTable, Page, PageTableFlags, Size4KiB, Translate}, PhysAddr, VirtAddr};
 
-use crate::{info, println};
+use crate::{println};
 
 use super::paging::{map_page, PagingManager};
 

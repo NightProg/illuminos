@@ -1,13 +1,32 @@
-use bootloader::{bootinfo::{MemoryMap, MemoryRegionType}, BootInfo};
+use alloc::collections::binary_heap::Iter;
+use bootloader_api::{info::{MemoryRegion, MemoryRegionKind, MemoryRegions}, BootInfo};
 use x86_64::{structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate}, PhysAddr, VirtAddr};
 
 
+pub fn get_physical_memory_offset(boot_info: &BootInfo) -> VirtAddr {
+    let memory_regions = boot_info.memory_regions.iter();
+    let usable_regions = memory_regions.filter(|r| r.kind == MemoryRegionKind::Usable);
+    let addr_ranges = usable_regions.map(|r| r.start..r.end);
+    let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
+    let mut min_addr = u64::MAX;
+    for addr in frame_addresses {
+        if addr < min_addr {
+            min_addr = addr;
+        }
+    }
+    if min_addr == u64::MAX {
+        panic!("No usable memory regions found");
+    }
+    let phys_mem_offset = PhysAddr::new(min_addr);
 
-
-pub unsafe fn init_paging(boot_info: &'static BootInfo) -> OffsetPageTable<'static> {
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    VirtAddr::new(phys_mem_offset.as_u64())
     
-    // Récupérer l'adresse physique de la PML4 et la convertir en VirtAddr
+}
+
+pub unsafe fn init_paging(boot_info: &BootInfo) -> OffsetPageTable<'static> {
+    let boot_info = boot_info;
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset.into_option().expect("No physical memory offset found"));
+    
     let level_4_table = unsafe {
         active_level_4_table(phys_mem_offset)
     };
@@ -39,58 +58,74 @@ pub fn map_page(
 
 
 
-pub struct KernelFrameAllocator {
-    memory_map: &'static MemoryMap,
+pub struct KernelFrameAllocator<'a> {
+    memory_map: &'a [MemoryRegion],
     next: usize,
 }
 
-impl KernelFrameAllocator {
-    pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
+impl<'a> KernelFrameAllocator<'a> {
+    pub unsafe fn init(boot_info: &'a BootInfo) -> Self {
         KernelFrameAllocator {
-            memory_map,
+            memory_map: &boot_info.memory_regions,
             next: 0,
         }
     }
 
     fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
-        let addr_ranges = usable_regions.map(|r| r.range.start_addr()..r.range.end_addr());
+        let usable_regions = regions.filter(|r| r.kind == MemoryRegionKind::Usable);
+        let addr_ranges = usable_regions.map(|r| r.start..r.end);
         let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
 }
 
 
-pub struct PagingManager {
-    pub mapper: OffsetPageTable<'static>,
-    pub frame_allocator: KernelFrameAllocator,
+pub struct PagingManager<'p> {
+    pub mapper: OffsetPageTable<'p>,
+    pub frame_allocator: KernelFrameAllocator<'p>,
 }
 
-impl PagingManager {
-    pub unsafe fn new(boot_info: &'static BootInfo) -> Self {
+impl<'p> PagingManager<'p> {
+    pub unsafe fn new(boot_info: &'p BootInfo) -> Self {
+        let mut boot_info = boot_info;
         let mapper = unsafe { init_paging(boot_info) };
-        let frame_allocator = unsafe { KernelFrameAllocator::init(&boot_info.memory_map) };
+        let frame_allocator = unsafe { KernelFrameAllocator::init(&mut boot_info) };
         PagingManager {
             mapper,
             frame_allocator,
         }
     }
 
+    pub fn map_page(
+        &mut self,
+        page: Page,
+        frame: PhysFrame,
+        flags: PageTableFlags,
+    ) {
+        map_page(page, frame, &mut self.mapper, &mut self.frame_allocator, flags);
+    }
+
     pub fn map_memory(
         &mut self,
         virt_addr: VirtAddr,
+        size: usize,
         phys_addr: PhysAddr,
         flags: PageTableFlags,
     ) {
         let page = Page::containing_address(virt_addr);
         let frame = PhysFrame::containing_address(phys_addr);
-        map_page(page, frame, &mut self.mapper, &mut self.frame_allocator, flags);
+        let page_count = ((size + 4095) / 4096) as u64;
+        let pages = (0..page_count).map(|i| page + i);
+        for page in pages {
+            self.map_page(page, frame, flags);
+        }
+
     }
     
 }
 
-unsafe impl FrameAllocator<Size4KiB> for KernelFrameAllocator {
+unsafe impl<'a> FrameAllocator<Size4KiB> for KernelFrameAllocator<'a> {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         let frame = self.usable_frames().nth(self.next);
         self.next += 1;

@@ -1,7 +1,13 @@
 use core::fmt::Display;
 
-use crate::{drivers::vga, print, println};
+use crate::{graphic::{BLUE, RED, YELLOW}, print, println};
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogOutput {
+    Serial,
+    TextBuffer,
+}
 
 pub enum LogLevel {
     Info,
@@ -33,10 +39,14 @@ macro_rules! log {
     };
 }
 
-pub static LOGGER: spin::Mutex<Logger> = spin::Mutex::new(Logger::new(LogLevel::Info));
+pub static LOGGER: spin::Mutex<Logger> = spin::Mutex::new(Logger::new(LogLevel::Info, LogOutput::Serial));
 
 pub fn set_log_level(level: LogLevel) {
     LOGGER.lock().level = level;
+}
+
+pub fn set_log_output(output: LogOutput) {
+    LOGGER.lock().output = output;
 }
 
 
@@ -65,32 +75,33 @@ macro_rules! error {
 
 pub struct Logger {
     level: LogLevel,
+    output: LogOutput,
 }
 
 impl Logger {
-    pub const fn new(level: LogLevel) -> Self {
+    pub const fn new(level: LogLevel, output: LogOutput) -> Self {
         Logger {
             level,
+            output,
         }
     }
 }
 
 impl core::fmt::Write for Logger {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let old = vga::get_color();
-        match self.level {
-            LogLevel::Info => {
-                vga::set_color(vga::Color::LightBlue, vga::Color::Black);
-            }
-            LogLevel::Warning => {
-                vga::set_color(vga::Color::Yellow, vga::Color::Black);
-            }
-            LogLevel::Error => {
-                vga::set_color(vga::Color::Red, vga::Color::Black);
-            }
+        if self.output == LogOutput::Serial {
+            print!(serial, "{}", s);
+        } else if self.output == LogOutput::TextBuffer {
+            let old = crate::graphic::console::get_global_text_buffer_color();
+            crate::graphic::console::set_global_text_buffer_color(match self.level {
+                LogLevel::Info => BLUE,
+                LogLevel::Warning => YELLOW,
+                LogLevel::Error => RED,
+            });
+
+            print!(textbuffer, "{}", s);
+            crate::graphic::console::set_global_text_buffer_color(old);
         }
-        print!("{}", s);
-        vga::set_color(old.foreground(), old.background());
         Ok(())
     }
 }

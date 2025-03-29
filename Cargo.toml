@@ -4,12 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bootloader = { version = "0.9", features = ["map_physical_memory"] }
+bootloader_api = "0.11"
+bootloader =  { version = "0.11" , optional = true }
 volatile = "0.2.6"
 spin = "0.5.2"
 x86_64 = "0.15.2"
 pic8259 = "0.10.0"
 linked_list_allocator = "0.9.0"
+ata_x86 = "0.1.1"
 
 
 [dependencies.lazy_static]
@@ -21,3 +23,19 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[[bin]]
+name = "illuminos-bios"
+path = "src/boot/bios.rs"
+required-features = ["illuminos-boot-features"]
+
+[[bin]]
+name = "illuminos-uefi"
+path = "src/boot/uefi.rs"
+required-features = ["illuminos-boot-features"]
+
+[features]
+illuminos-boot-features = ["bootloader"]
+
+[package.metadata.bootloader]
+physical-memory-offset = "0x0000f00000000000"

@@ -1,9 +1,11 @@
+use core::ops::{Deref, DerefMut};
+
 use pic8259::ChainedPics;
 use spin::Mutex;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::{instructions::port::Port, structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode}};
 use lazy_static::lazy_static;
 
-use crate::{drivers::keyboard::{Keyboard, KEYBOARD}, print};
+use crate::{context::GLOBAL_CONTEXT, drivers::keyboard::{Keyboard, KEYBOARD}, io::serial::SerialPortWriter, print, println};
 
 
 pub static PICS: Mutex<ChainedPics> = Mutex::new(unsafe {
@@ -77,12 +79,18 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, e
 }
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
+    if !GLOBAL_CONTEXT.lock().is_context_initialized() {
+        unsafe { PICS.lock().notify_end_of_interrupt(33) };
+    }
+
+
     let scancode = KEYBOARD.lock().read_key();
     if let Some(key) = scancode {
-        KEYBOARD.lock().handle_key(key);
+        KEYBOARD.lock().handle_key(key, &GLOBAL_CONTEXT);
     }
     unsafe { PICS.lock().notify_end_of_interrupt(33) };
 }
+
 
 
 extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {

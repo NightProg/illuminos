@@ -5,7 +5,7 @@ use spin::Mutex;
 use x86_64::instructions::port::Port;
 use lazy_static::lazy_static;
 
-use crate::WRITER;
+use crate::{context::{self, Context}};
 
 
 #[derive(Debug, PartialEq, Eq)]
@@ -67,21 +67,7 @@ impl Key {
                 Some(*c)
             },
             Key::Special(s) => {
-                Some(match s {
-                    SpecialKey::Backspace => { WRITER.lock().remove_last_char(); return None }
-                    SpecialKey::Tab => { '\t' }
-                    SpecialKey::Enter => { '\n' }
-                    SpecialKey::Escape => { return None }
-                    SpecialKey::Left => { return None }
-                    SpecialKey::Right => { return None }
-                    SpecialKey::Up => { return None }
-                    SpecialKey::Down => { return None }
-                    SpecialKey::Home => { return None }
-                    SpecialKey::End => { return None }
-                    SpecialKey::PageUp => { return None }
-                    SpecialKey::Space => { ' ' }
-                    _ => { '\0'}
-                })
+                None
             },
         }
     }
@@ -121,8 +107,8 @@ pub enum SpecialKey {
 
 
 
-pub struct Keyboard {
-    pub handle_key: fn(KeyEvent),
+pub struct Keyboard{
+    pub handle_key: fn(KeyEvent, &Mutex<Context>),
 }
 
 impl Keyboard {
@@ -139,23 +125,24 @@ impl Keyboard {
         KeyEvent::from_scancode::<qwerty::Qwerty>(scancode)
     }
 
-    pub fn new(key: fn(KeyEvent)) -> Keyboard {
+    pub fn new(key: fn(KeyEvent, &Mutex<Context>)) -> Keyboard {
         Keyboard {
             handle_key: key,
         }
     }
 
-    pub fn handle_key(&self, key: KeyEvent) {
-        (self.handle_key)(key);
+    pub fn handle_key(&self, key: KeyEvent, context: &Mutex<Context>) {
+        (self.handle_key)(key, context);
     }
 }
 
 
 lazy_static! {
-    pub static ref KEYBOARD: Mutex<Keyboard> = Mutex::new(Keyboard::new(|_| {}));
+    pub static ref KEYBOARD: Mutex<Keyboard> = Mutex::new(Keyboard::new(|_, _| {}));
 }
 
-pub fn set_keyboard_handler(handler: fn(KeyEvent)) {
+pub fn set_keyboard_handler(handler: fn(KeyEvent, &Mutex<Context>)) {
+
     KEYBOARD.lock().handle_key = handler;
 }
 
