@@ -1,6 +1,6 @@
 use core::ops::Deref;
 
-use console::TextEdit;
+use text::TextEdit;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
@@ -9,6 +9,9 @@ use crate::{context::GLOBAL_CONTEXT, drivers::keyboard::KeyEvent};
 pub mod vram;
 pub mod framebuffer;
 pub mod font;
+pub mod text;
+pub mod windows;
+pub mod app;
 pub mod console;
 
 pub const RED: u32 = 0xFF0000;

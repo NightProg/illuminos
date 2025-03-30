@@ -1,216 +1,142 @@
-use core::{fmt::Write, ops::Deref};
+use alloc::string::{String, ToString};
 
-use alloc::vec::Vec;
-use lazy_static::lazy_static;
-use spin::Mutex;
-
-use crate::{context::GLOBAL_CONTEXT, drivers::keyboard::{Key, KeyEvent, KeyState, SpecialKey}};
-
-use super::{font::FONT_DEFAULT, framebuffer::{self, FrameBuffer}, GraphicMode, WHITE};
-
-lazy_static! {
-    pub static ref GLOBAL_TEXT_BUFFER: Mutex<TextBuffer> = Mutex::new(TextBuffer::new());
-    pub static ref GLOBAL_TEXT_EDIT: Mutex<TextEdit> = Mutex::new(TextEdit::from_text_buffer(GLOBAL_TEXT_BUFFER.lock().clone()));
+use crate::{drivers::keyboard::Key, error};
+use crate::graphic::text::{TextBuffer, TextEdit};
+use crate::graphic::windows::WindowManager;
+use super::{app::Application, windows::{Window, WINDOW_MANAGER}, GraphicMode};
+use core::fmt::Write;
+pub enum ConsoleCommand {
+    Clear,
+    Print(Expr),
+    Println(Expr),
 }
 
-pub fn set_global_text_buffer_color(color: u32) {
-    GLOBAL_TEXT_BUFFER.lock().set_color(color);
-}
-
-pub fn get_global_text_buffer_color() -> u32 {
-    GLOBAL_TEXT_BUFFER.lock().color
-}
-
-#[macro_export]
-macro_rules! print_textbuffer {
-    ($($arg:tt)*) => {
-        {
-            use core::fmt::Write;
-            write!(&mut *$crate::graphic::console::GLOBAL_TEXT_BUFFER.lock(), $($arg)*).unwrap();
-        }
-    }
-}
-
-#[macro_export]
-macro_rules! println_textbuffer {
-    ($($arg:tt)*) => {
-        {
-            use core::fmt::Write;
-            writeln!(&mut *$crate::graphic::console::GLOBAL_TEXT_BUFFER.lock(), $($arg)*).unwrap();
-        }
-    }
-}
-
-
-#[derive(Debug, Clone)]
-pub struct TextBuffer {
-    pub width: usize,
-    pub height: usize,
-    pub cursor_x: usize,
-    pub cursor_y: usize,
-    pub color: u32,
-    pub cursor_x_old: Vec<usize>,
-    pub cursor_old_pos: (usize, usize)
-}
-
-impl TextBuffer {
-    pub fn new() -> Self {
-        let width = GLOBAL_CONTEXT.lock().framebuffer.as_ref().unwrap().width() / 8; // Largeur de la zone de texte
-        let height = GLOBAL_CONTEXT.lock().framebuffer.as_ref().unwrap().height() / 16; // Hauteur de la zone de texte
-        TextBuffer {
-            width,
-            height,
-            cursor_x: 0,
-            cursor_y: 0,
-            cursor_x_old: Vec::new(),
-            color: 0xFFFFFF,
-            cursor_old_pos: (0, 0)
-        }
-    }
-
-    pub fn set_color(&mut self, color: u32) {
-        self.color = color;
-    }
-
-    pub fn draw_char(&mut self, c: char, x: usize, y: usize) {
-        FONT_DEFAULT.draw_char(c, x * 8, y * 16, GLOBAL_CONTEXT.lock().framebuffer.as_mut().unwrap(), self.color);
-    }
-
-    pub fn clear_char(&mut self, x: usize, y: usize) {
-        FONT_DEFAULT.clear_char(x * 8, y * 16, GLOBAL_CONTEXT.lock().framebuffer.as_mut().unwrap());
-    }
-
-    pub fn draw_string(&mut self, s: &str, x: usize, y: usize) {
-        FONT_DEFAULT.draw_string(s, x * 8, y * 16, GLOBAL_CONTEXT.lock().framebuffer.as_mut().unwrap(), self.color);
-    }
-
-    pub fn clear(&mut self) {
-        for y in 0..self.height {
-            for x in 0..self.width {
-                self.clear_char(x, y);
-            }
-        }
-    }
-
-
-
-    pub fn set_cursor(&mut self, x: usize, y: usize) {
-        self.cursor_x = x;
-        self.cursor_y = y;
-    }
-
-    pub fn get_cursor(&self) -> (usize, usize) {
-        (self.cursor_x, self.cursor_y)
-    }
-
-    pub fn write(&mut self, c: char) {
-        if c == '\n' {
-            self.cursor_x_old.push(self.cursor_x);
-            self.cursor_x = 0;
-            self.cursor_y += 1; 
-
-        } else {
-            self.draw_char(c, self.cursor_x, self.cursor_y);
-            self.cursor_x += 1;
-
-
-        }
-
-        if self.cursor_x >= self.width {
-            self.cursor_x_old.push(self.cursor_x);
-            self.cursor_x = 0;
-            self.cursor_y += 1;
-
-
-        }
-
-        if self.cursor_y >= self.height {
-            self.clear();
-            self.cursor_y = 0;
-
-        }
-    }
-
-    pub fn remove_char(&mut self) {
-        if self.cursor_x > 0 {
-            self.cursor_x -= 1;
-            self.clear_char(self.cursor_x, self.cursor_y);
-        } else {
-            if self.cursor_y > 0 {
-                self.cursor_y -= 1;
-                self.cursor_x = self.cursor_x_old.pop().unwrap_or(0);
-                self.clear_char(self.cursor_x, self.cursor_y);
-            }
-        }
-
-    }
-
-    pub fn write_string(&mut self, s: &str) {
-        for c in s.chars() {
-            self.write(c);
-        }
-    }
-
-}
-
-
-impl Write for TextBuffer {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        self.write_string(s);
-        Ok(())
-    }
-}
-
-pub struct TextEdit {
-    pub text_buffer: TextBuffer,
-}
-
-impl TextEdit {
-    pub fn from_text_buffer(text_buffer: TextBuffer) -> Self {
-        TextEdit { text_buffer }
-    }
-    pub fn new() -> Self {
-        let text_buffer = TextBuffer::new();
-        TextEdit { text_buffer }
-    }
-
-    pub fn write(&mut self, c: char) {
-        self.text_buffer.write(c);
-    }
-
-    pub fn remove_char(&mut self) {
-        self.text_buffer.remove_char();
-    }
-
-
-    pub fn clear(&mut self) {
-        self.text_buffer.clear();
-    }
-}
-
-
-
-impl GraphicMode for TextEdit {
-    fn handle_keyboard_event(&mut self, event: KeyEvent) {
-        match event.key {
-            Key::Char(c)  => {
-                self.write(c);
-            },
-            Key::Special(spe) => {
-                match spe {
-                    SpecialKey::Enter => {
-                        self.write('\n');
-                    }
-                    SpecialKey::Backspace => {
-                        if event.state == KeyState::Released {
-                            return;
-                        }
-                        self.remove_char();
-                    }
-                    _ => {}
+impl ConsoleCommand {
+    pub fn from_str(cmd: &str) -> Option<Self> {
+        let mut parts = cmd.split_whitespace();
+        match parts.next() {
+            Some("clear") => Some(ConsoleCommand::Clear),
+            Some("print") => {
+                if let Some(arg) = parts.next() {
+                    Some(ConsoleCommand::Print(Expr::from_str(arg)))
+                } else {
+                    None
                 }
             }
+            Some("println") => {
+                if let Some(arg) = parts.next() {
+                    Some(ConsoleCommand::Println(Expr::String(arg.to_string())))
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 }
 
+pub enum Expr {
+    String(String),
+    Number(i32),
+    Bool(bool),
+}
+
+impl Expr {
+    pub fn from_str(s: &str) -> Self {
+        if let Ok(num) = s.parse::<i32>() {
+            Expr::Number(num)
+        } else if s == "true" {
+            Expr::Bool(true)
+        } else if s == "false" {
+            Expr::Bool(false)
+        } else {
+            Expr::String(s.to_string())
+        }
+    }
+}
+
+pub struct Console {
+    winid: usize,
+    current_cmd: String,
+    text_edit: TextEdit
+}
+
+impl Console {
+    pub fn new() -> Self {
+        Console {
+            winid: 0,
+            current_cmd: String::new(),
+            text_edit: TextEdit::new(0)
+        }
+    }
+
+
+    pub fn text_buffer_mut(&mut self) -> &mut TextBuffer {
+        &mut self.text_edit.text_buffer
+    }
+
+    pub fn get_window_id(&self) -> usize {
+        self.winid
+    }
+
+    pub fn set_window_id(&mut self, console: usize, id: usize) {
+        self.winid = console;
+        self.text_edit.text_buffer.winid = id;
+        self.text_edit.text_buffer.init();
+    }
+
+    pub fn exec_cmd(&mut self, cmd: String) {
+        if let Some(command) = ConsoleCommand::from_str(&cmd) {
+            match command {
+                ConsoleCommand::Clear => self.clear(),
+                ConsoleCommand::Print(expr) => self.print(expr),
+                ConsoleCommand::Println(expr) => self.println(expr),
+            }
+        } else {
+            error!("Unknown command: {}", cmd);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        let mut window = WINDOW_MANAGER.lock();
+        let win = window.get_window_mut(self.winid);
+        win.clear();
+    }
+
+    pub fn print(&mut self, expr: Expr) {
+        let mut window = WINDOW_MANAGER.lock();
+        let win = window.get_window_mut(self.winid);
+        match expr {
+            Expr::String(s) => write!(self.text_buffer_mut(), "{}: {}", win.get_window_id(), s).unwrap(),
+            Expr::Number(n) => write!(self.text_buffer_mut(), "{}: {}", win.get_window_id(), n).unwrap(),
+            Expr::Bool(b) => write!(self.text_buffer_mut(), "{}: {}", win.get_window_id(), b).unwrap(),
+        }
+    }
+
+    pub fn println(&mut self, expr: Expr) {
+        self.print(expr);
+        self.text_buffer_mut().write('\n');
+    }
+
+    
+}
+
+impl Application for Console {
+    fn window(&mut self) -> usize {
+        // let head_window = WindowManager::head();
+        let mut windows_manager = WINDOW_MANAGER.lock();
+        let console = windows_manager.new_window(600, 800, 0, 0);
+        let buffer = windows_manager.new_window(600,800, 800, 0);
+        self.set_window_id(console, buffer);
+        self.winid
+    }
+
+    fn handle_keyboard_event(&mut self, event: crate::drivers::keyboard::KeyEvent) {
+        self.text_edit.handle_keyboard_event(event);
+    }
+
+    fn refresh(&mut self) {
+        WINDOW_MANAGER.lock().sync()
+    }
+
+}

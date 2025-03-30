@@ -1,12 +1,14 @@
 use core::fmt::Display;
 
 use crate::{graphic::{BLUE, RED, YELLOW}, print, println};
-
+use crate::graphic::text::TextBuffer;
+use crate::graphic::windows::WINDOW_MANAGER;
+use crate::io::serial::SerialPortWriter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogOutput {
     Serial,
-    TextBuffer,
+    TextBuffer(usize),
 }
 
 pub enum LogLevel {
@@ -90,17 +92,17 @@ impl Logger {
 impl core::fmt::Write for Logger {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         if self.output == LogOutput::Serial {
-            print!(serial, "{}", s);
-        } else if self.output == LogOutput::TextBuffer {
-            let old = crate::graphic::console::get_global_text_buffer_color();
-            crate::graphic::console::set_global_text_buffer_color(match self.level {
+            print!("{}", s);
+        } else if let LogOutput::TextBuffer(winid) = self.output {
+            let mut text_buffer = TextBuffer::new(winid);
+            text_buffer.set_color(match self.level {
                 LogLevel::Info => BLUE,
                 LogLevel::Warning => YELLOW,
                 LogLevel::Error => RED,
             });
 
-            print!(textbuffer, "{}", s);
-            crate::graphic::console::set_global_text_buffer_color(old);
+            write!(text_buffer, "{}", s)?;
+            
         }
         Ok(())
     }

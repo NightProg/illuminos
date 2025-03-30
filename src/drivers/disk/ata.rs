@@ -201,5 +201,14 @@ impl AtaPio {
     
         buffer
     }
+
+    pub fn flush_cache(&mut self) {
+        unsafe {
+            self.drive_select.write(0xE0);
+            self.command.write(0xE7);  // FLUSH CACHE
+        }
+    
+        while unsafe { self.status.read() } & 0x80 != 0 {}
+    }
     
 }

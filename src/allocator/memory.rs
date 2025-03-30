@@ -15,7 +15,7 @@ use super::paging::{map_page, PagingManager};
 
 
 pub const HEAP_START: VirtAddr = VirtAddr::new(0x4444_4444_0000);
-pub const HEAP_SIZE: u64 = 1024 * 1024; // 1 MiB
+pub const HEAP_SIZE: u64 = 1024 * 1024 * 10; // 100 Mo
 
 pub fn init_heap(paging_manager: &mut PagingManager, flags: PageTableFlags) {
     reserve_memory(HEAP_START, HEAP_SIZE, &mut paging_manager.mapper, &mut paging_manager.frame_allocator, flags);

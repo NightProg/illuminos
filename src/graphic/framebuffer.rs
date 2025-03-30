@@ -1,7 +1,11 @@
-use core::ops::{Deref, DerefMut};
+use core::{alloc::Layout, ops::{Deref, DerefMut}};
 
+use alloc::alloc::alloc;
+use alloc::boxed::Box;
 use bootloader_api::info::{FrameBuffer as BootFrameBuffer, FrameBufferInfo, PixelFormat};
 
+use crate::{error, info};
+use crate::context::GLOBAL_CONTEXT;
 use super::font::FONT_DEFAULT;
 
 
@@ -11,6 +15,30 @@ pub struct FrameBuffer {
 }
 
 impl FrameBuffer {
+    pub unsafe fn create_from_raw_addr(addr: u64, info: FrameBufferInfo) -> Self {
+        FrameBuffer {
+            frame: unsafe { BootFrameBuffer::new(addr, info) }
+        }
+    }
+
+    pub unsafe fn alloc(info: FrameBufferInfo) -> Self {
+        let size = info.width * info.height * info.bytes_per_pixel;
+        info!("Allocating framebuffer: size: {}, width: {}, height: {}, bytes_per_pixel: {}", size, info.width, info.height, info.bytes_per_pixel);
+        let addr = unsafe {
+            let ptr = alloc(Layout::from_size_align(size as usize, 4).unwrap());
+            if ptr.is_null() {
+                panic!("Allocation de framebuffer échouée");
+            }
+            ptr as u64
+        };
+        let mut info = info;
+        info.byte_len = size as usize;
+        info.stride = info.width;
+        FrameBuffer {
+            frame: unsafe { BootFrameBuffer::new(addr, info) }
+        }
+    }
+
     pub fn new(frame: BootFrameBuffer) -> Self {
         FrameBuffer {
             frame
@@ -37,11 +65,46 @@ impl FrameBuffer {
         self.frame.info().height
     }
 
+
     pub fn buffer(&self) -> &[u8] {
         self.frame.buffer()
     }
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         self.frame.buffer_mut()
+    }
+
+    pub fn info(&self) -> FrameBufferInfo {
+        self.frame.info()
+    }
+
+    pub fn get_pixel(&mut self, x: usize, y: usize) -> u32 {
+        let pixel_format = self.pixel_format();
+        let bytes_per_pixel = self.byte_per_pixel();
+        let stride = self.stride();
+        let width = self.width();
+        let height = self.height();
+
+        if x >= width || y >= height {
+            error!("Coordinates out of bounds: x: {}, y: {}, width: {}, height: {}", x, y, width, height);
+            return 0;
+        }
+
+        let offset = (y * stride + x) as usize * bytes_per_pixel;
+        let buffer = self.buffer_mut();
+        if offset + bytes_per_pixel > buffer.len() {
+            error!("Buffer overflow: offset {}, bytes_per_pixel {}, buffer length {} buffer stride {}", offset, bytes_per_pixel, buffer.len(), stride);
+            return 0; 
+        }
+
+        match pixel_format {
+            PixelFormat::Bgr => {
+                u32::from_ne_bytes(buffer[offset..offset + bytes_per_pixel].try_into().unwrap())
+            }
+            PixelFormat::Rgb => {
+                u32::from_ne_bytes(buffer[offset..offset + bytes_per_pixel].try_into().unwrap())
+            }
+            _ => 0,
+        }
     }
 
     pub fn draw_pixel(&mut self, x: usize, y: usize, color: u32) {
@@ -56,16 +119,20 @@ impl FrameBuffer {
         }
 
         let offset = (y * stride + x) as usize * bytes_per_pixel;
-
+        let buffer = self.buffer_mut();
+        if offset + bytes_per_pixel > buffer.len() {
+            error!("Buffer overflow: offset {}, bytes_per_pixel {}, buffer length {}", offset, bytes_per_pixel, buffer.len());
+            return; 
+        }
         match pixel_format {
             PixelFormat::Bgr => {
                 for i in 0..bytes_per_pixel {
-                    self.buffer_mut()[offset + i] = ((color >> (i * 8)) & 0xFF) as u8;
+                    buffer[offset + i] = ((color >> (i * 8)) & 0xFF) as u8;
                 }
             }
             PixelFormat::Rgb => {
                 for i in 0..bytes_per_pixel {
-                    self.buffer_mut()[offset + i] = ((color >> (8 * (bytes_per_pixel - 1 - i))) & 0xFF) as u8;
+                    buffer[offset + i] = ((color >> (8 * (bytes_per_pixel - 1 - i))) & 0xFF) as u8;
                 }
             }
             _ => {}
@@ -113,7 +180,37 @@ impl FrameBuffer {
         }
     }
 
-    pub fn draw_text(&mut self, text: &str, x: usize, y: usize, color: u32) {
+    pub fn draw_rect_no_fill(&mut self, x: usize, y: usize, width: usize, height: usize, color: u32) {
+        let screen_width = self.width();
+        let screen_height = self.height();
+
+        // Draw top and bottom borders
+        for i in x..x + width {
+            if i < screen_width {
+                if y < screen_height {
+                    self.draw_pixel(i, y, color); // Top border
+                }
+                if y + height - 1 < screen_height {
+                    self.draw_pixel(i, y + height - 1, color); // Bottom border
+                }
+            }
+        }
+
+        // Draw left and right borders
+        for j in y..y + height {
+            if j < screen_height {
+                if x < screen_width {
+                    self.draw_pixel(x, j, color); // Left border
+                }
+                if x + width - 1 < screen_width {
+                    self.draw_pixel(x + width - 1, j, color); // Right border
+                }
+            }
+        }
+    }
+        
+
+    pub fn draw_string(&mut self, text: &str, x: usize, y: usize, color: u32) {
         FONT_DEFAULT.draw_string(text, x, y, self, color);
     }
 
@@ -184,5 +281,69 @@ impl Deref for DoubleBuffer {
 impl DerefMut for DoubleBuffer {    
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.current_mut()
+    }
+}
+
+pub struct VirtualFrameBuffer {
+    x: usize,
+    y: usize,
+    framebuffer: Box<FrameBuffer>,
+}
+
+impl VirtualFrameBuffer {
+
+    pub fn global() -> Self {
+        let mut global_context = GLOBAL_CONTEXT.lock();
+        info!("Virtual framebuffer: global context: {:?}", global_context.framebuffer.is_some());
+        VirtualFrameBuffer {
+            x: 0,
+            y: 0,
+            framebuffer: global_context.framebuffer.take().unwrap()
+        }
+    }
+    pub fn new(framebuffer: FrameBuffer) -> Self {
+        VirtualFrameBuffer {
+            x: 0,
+            y: 0,
+            framebuffer: Box::new(framebuffer)
+        }
+    }
+
+    pub fn set_position(&mut self, x: usize, y: usize) {
+        self.x = x;
+        self.y = y;
+    }
+
+    pub fn get_position(&self) -> (usize, usize) {
+        (self.x, self.y)
+    }
+
+    pub fn render(&mut self, head_framebuffer: &mut FrameBuffer) {
+        let width = self.framebuffer.width();
+        let height = self.framebuffer.height();
+        let screen_width = head_framebuffer.width();
+        let screen_height = head_framebuffer.height();
+        for j in 0..height {
+            for i in 0..width {
+                if self.x + i >= screen_width || self.y + j >= screen_height {
+                    error!("Virtual framebuffer out of bounds: x: {}, y: {}", self.x + i, self.y + j);
+                    continue;
+                }
+                let pixel = &self.framebuffer.get_pixel(i, j);
+
+                head_framebuffer.draw_pixel(self.x + i, self.y + j, *pixel);
+
+
+            }
+
+        }
+    }
+
+    pub fn frame_buffer_mut(&mut self) -> &mut FrameBuffer {
+        &mut self.framebuffer
+    }
+
+    pub fn frame_buffer(&self) -> &FrameBuffer {
+        &self.framebuffer
     }
 }

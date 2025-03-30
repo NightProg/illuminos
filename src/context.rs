@@ -12,22 +12,33 @@ pub fn init_global_context(framebuffer: FrameBuffer) {
     GLOBAL_CONTEXT.lock().framebuffer = Some(Box::new(framebuffer));
 }
 
+pub fn app_ready() {
+    GLOBAL_CONTEXT.lock().is_app_initialized = true;
+}
+
 pub struct Context {
     pub framebuffer: Option<Box<FrameBuffer>>,
+    pub is_app_initialized: bool,
 }
 
 impl Context {
     pub const fn none() -> Self {
-        Self { framebuffer: None }
+        Self { framebuffer: None, is_app_initialized: false }
     }
 
     pub fn new(framebuffer: FrameBuffer) -> Self {
         Self {
             framebuffer: Some(Box::new(framebuffer)),
+            is_app_initialized: false,
         }
     }
 
-    pub fn is_context_initialized(&self) -> bool {
+    pub fn is_framebuffer_initialized(&self) -> bool {
         self.framebuffer.is_some()
     }
+    
+    pub fn is_app_initialized(&self) -> bool {
+        self.is_app_initialized
+    }
+    
 }

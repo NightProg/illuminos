@@ -38,21 +38,15 @@ impl<T> Iterator for IterPtr<T> {
 
 #[macro_export]
 macro_rules! print {
-    (serial, $($arg:tt)*) => ({
+    ($($arg:tt)*) => ({
         $crate::print_serial!($($arg)*);
     });
-    (textbuffer, $($arg:tt)*) => ({
-        $crate::print_textbuffer!($($arg)*);
-    })
 }
 
 #[macro_export]
 macro_rules! println {
-    (serial, $($arg:tt)*) => ({
+    ($($arg:tt)*) => ({
         $crate::println_serial!($($arg)*);
     });
-    (textbuffer, $($arg:tt)*) => ({
-        $crate::println_textbuffer!($($arg)*);
-    })
 }
 

@@ -5,7 +5,7 @@ use spin::Mutex;
 use x86_64::{instructions::port::Port, structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode}};
 use lazy_static::lazy_static;
 
-use crate::{context::GLOBAL_CONTEXT, drivers::keyboard::{Keyboard, KEYBOARD}, io::serial::SerialPortWriter, print, println};
+use crate::{context::GLOBAL_CONTEXT, drivers::keyboard::{Keyboard, KEYBOARD}, info, io::serial::SerialPortWriter, print, println};
 
 
 pub static PICS: Mutex<ChainedPics> = Mutex::new(unsafe {
@@ -79,7 +79,7 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, e
 }
 
 extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
-    if !GLOBAL_CONTEXT.lock().is_context_initialized() {
+    if !GLOBAL_CONTEXT.lock().is_framebuffer_initialized() {
         unsafe { PICS.lock().notify_end_of_interrupt(33) };
     }
 

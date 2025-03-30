@@ -46,7 +46,7 @@ impl BootSector {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct DirectoryEntry {
     name: [u8; 11],
     attr: u8,
@@ -213,11 +213,127 @@ impl FAT32 {
         None
     }
 
-    pub fn create_directory(&mut self, ata: &mut AtaPio, dir_cluster: u32, name: &str) -> Option<DirectoryEntry> {
-        let entrie = self.create_file(ata, dir_cluster, name, true)?;
+    pub fn init_directory(&mut self, ata: &mut AtaPio, dir_cluster: u32, root_cluser: u32) {
+        
+        // . dir 
+        let mut dot_entry = DirectoryEntry {
+            name: [0x20; 11],
+            attr: 0x10,
+            reserved: 0,
+            ctime: 0,
+            cdate: 0,
+            adate: 0,
+            first_cluster_high: (dir_cluster >> 16) as u16,
+            mtime: 0,
+            mdate: 0,
+            ctime_tenth: 0,
+            first_cluster_low: (dir_cluster & 0xFFFF) as u16,
+            size: 0,
+        };
 
-        self.write_fat_entry(ata, cluster, value);
-   
+        dot_entry.name[0] = 0x2E;
+
+        let mut dotdot_entry = DirectoryEntry {
+            name: [0x20; 11],
+            attr: 0x10,
+            reserved: 0,
+            ctime: 0,
+            cdate: 0,
+            adate: 0,
+            first_cluster_high: (root_cluser >> 16) as u16,
+            mtime: 0,
+            mdate: 0,
+            ctime_tenth: 0,
+            first_cluster_low: (root_cluser & 0xFFFF) as u16,
+            size: 0,
+        };
+        dotdot_entry.name[0] = 0x2E;
+        self.write_directory_entry(ata, dir_cluster, &dot_entry);
+        self.write_directory_entry(ata, dir_cluster, &dotdot_entry);
+
+    }
+
+    pub fn create_directory(&mut self,ata: &mut AtaPio, parent_cluster: u32, name: &str) -> Option<DirectoryEntry> {
+        let new_cluster = self.find_free_cluster(ata)?;
+
+        self.write_fat_entry(ata, new_cluster, 0x0FFFFFFF); // Marquer la fin de la chaîne
+    
+        let mut buffer = [0u8; 512];
+    
+        // Création des entrées spéciales "." et ".."
+        let mut dot_entry = DirectoryEntry {
+            name: [b' '; 11], attr: 0x10, reserved: 0,
+            ctime: 0, cdate: 0, adate: 0,
+            first_cluster_high: (new_cluster >> 16) as u16,
+            mtime: 0, mdate: 0,
+            ctime_tenth: 0,
+            first_cluster_low: (new_cluster & 0xFFFF) as u16,
+            size: 0,
+        };
+        dot_entry.name[..1].copy_from_slice(b".");
+        unsafe {
+            core::ptr::copy_nonoverlapping(&dot_entry as *const _ as *const u8, buffer.as_mut_ptr(), size_of::<DirectoryEntry>());
+        }
+    
+        let mut dotdot_entry = dot_entry;
+        dotdot_entry.name[..2].copy_from_slice(b"..");
+        dotdot_entry.first_cluster_high = (parent_cluster >> 16) as u16;
+        dotdot_entry.first_cluster_low = (parent_cluster & 0xFFFF) as u16;
+        unsafe {
+            core::ptr::copy_nonoverlapping(&dotdot_entry as *const _ as *const u8, buffer.as_mut_ptr().add(size_of::<DirectoryEntry>()), size_of::<DirectoryEntry>());
+        }
+    
+        let sector = self.cluster_to_sector(new_cluster);
+        ata.write_sector8(sector, &buffer);
+    
+        // Ajouter l'entrée dans le parent
+        let mut new_entry = DirectoryEntry {
+            name: [b' '; 11],
+            attr: 0x10, reserved: 0,
+            ctime: 0, cdate: 0, adate: 0,
+            first_cluster_high: (new_cluster >> 16) as u16,
+            mtime: 0, mdate: 0,
+            ctime_tenth: 0,
+            first_cluster_low: (new_cluster & 0xFFFF) as u16,
+            size: 0,
+        };
+        let name_bytes = name.as_bytes();
+        for j in 0..name_bytes.len().min(11) {
+            new_entry.name[j] = name_bytes[j];
+        }
+        self.write_directory_entry(ata, parent_cluster, &new_entry);
+        
+        Some(new_entry)
+    }
+
+    pub fn debug(&mut self, ata: &mut AtaPio) {
+        for cluster in 2..10 {
+            let entry = self.read_fat_entry(ata, cluster);
+            info!("Cluster: {:#X}, Entry: {:#X}", cluster, entry);
+        }
+    }
+    
+    
+    pub fn write_directory_entry(&mut self, ata: &mut AtaPio, dir_cluster: u32, entry: &DirectoryEntry) {
+
+        let sector = self.data_start + (dir_cluster - 2) * self.cluster_size;
+        let mut buffer = [0u8; 512];
+        ata.read_sector8(sector, &mut buffer);
+        let mut i = 0;
+        while i < 512 {
+            let entry: DirectoryEntry = unsafe { core::ptr::read(buffer.as_ptr().add(i) as *const _) };
+            if entry.name[0] == 0x00 {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(&entry as *const _ as *const u8, buffer.as_mut_ptr().add(i), size_of::<DirectoryEntry>());
+                }
+                ata.write_sector8(sector, &buffer);
+                return;
+            }
+            i += size_of::<DirectoryEntry>();
+        }
+
+        
+        
     }
     pub fn delete_file(&mut self, ata: &mut AtaPio, dir_cluster: u32, name: &str) -> bool {
         let entries = self.read_directory(ata, dir_cluster);
