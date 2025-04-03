@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;
 use crate::drivers::keyboard::KeyEvent;
-
+use crate::graphic::framebuffer::FrameBuffer;
 
 lazy_static! {
     pub static ref APP_MANAGER: Mutex<AppManager> = Mutex::new(AppManager::new());
@@ -43,9 +43,9 @@ impl AppManager {
         }
     }
     
-    pub fn refresh(&mut self) {
+    pub fn refresh(&mut self, frame_buffer: &mut FrameBuffer) {
         if self.apps.len() > 0 {
-            self.apps[self.current_app].lock().refresh();
+            self.apps[self.current_app].lock().refresh(frame_buffer);
         }
     }
     
@@ -63,5 +63,5 @@ pub trait Application: Send + Sync {
 
     fn handle_keyboard_event(&mut self, event: KeyEvent);
 
-    fn refresh(&mut self);
+    fn refresh(&mut self, frame_buffer: &mut FrameBuffer);
 } 

@@ -5,6 +5,8 @@ use crate::graphic::text::{TextBuffer, TextEdit};
 use crate::graphic::windows::WindowManager;
 use super::{app::Application, windows::{Window, WINDOW_MANAGER}, GraphicMode};
 use core::fmt::Write;
+use crate::graphic::framebuffer::FrameBuffer;
+
 pub enum ConsoleCommand {
     Clear,
     Print(Expr),
@@ -135,8 +137,8 @@ impl Application for Console {
         self.text_edit.handle_keyboard_event(event);
     }
 
-    fn refresh(&mut self) {
-        WINDOW_MANAGER.lock().sync()
+    fn refresh(&mut self, frame_buffer: &mut FrameBuffer) {
+        WINDOW_MANAGER.lock().sync(frame_buffer)
     }
 
 }

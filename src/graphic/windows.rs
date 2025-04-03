@@ -86,10 +86,6 @@ impl Window {
         let mut virt = virt;
         let width = virt.frame_buffer().width();
         let height = virt.frame_buffer().height();
-
-        info!("Creating window at ({}, {}) with size ({}, {})", x, y, width, height);
-        virt.frame_buffer_mut().draw_rect_no_fill(x, y, width, height, 0xFFFFFF);
-        info!("Window created");
         Window { virt, window_id }
     }
 
@@ -136,8 +132,8 @@ impl Window {
 
     }
 
-    pub fn sync(&mut self) {
-        self.virt.render(GLOBAL_CONTEXT.lock().framebuffer.as_mut().unwrap());
+    pub fn sync(&mut self, frame_buffer: &mut FrameBuffer) {
+        self.virt.render(frame_buffer);
     }
 
 
@@ -153,7 +149,7 @@ impl WindowManager {
         let f = VirtualFrameBuffer::global();
         Window::new(f, 0, 0, 0)
     }
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         WindowManager {
             windows: vec![],
             current_window: 0,
@@ -183,10 +179,10 @@ impl WindowManager {
         );
 
         virt_framebuffer.set_position(x, y);
+        virt_framebuffer.frame_buffer_mut().draw_rect_no_fill(0, 0, width, height, 0xAAAAAA);
         let window = Window::new(virt_framebuffer, self.windows.len(), x, y);
         self.windows.push(window);
         self.current_window = self.windows.len() - 1;
-        self.windows[self.current_window].sync();
         self.current_window
     }
 
@@ -216,9 +212,9 @@ impl WindowManager {
         &mut self.windows[self.current_window]
     }
 
-    pub fn sync(&mut self) {
+    pub fn sync(&mut self, frame_buffer: &mut FrameBuffer) {
         for window in &mut self.windows {
-            window.sync();
+            window.sync(frame_buffer);
         }
     }
 

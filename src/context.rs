@@ -16,6 +16,8 @@ pub fn app_ready() {
     GLOBAL_CONTEXT.lock().is_app_initialized = true;
 }
 
+
+#[derive(Debug, Clone)]
 pub struct Context {
     pub framebuffer: Option<Box<FrameBuffer>>,
     pub is_app_initialized: bool,

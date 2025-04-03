@@ -56,8 +56,6 @@ pub fn map_page(
     map_result.expect("map_to failed").flush();
 }
 
-
-
 pub struct KernelFrameAllocator<'a> {
     memory_map: &'a [MemoryRegion],
     next: usize,
@@ -122,6 +120,7 @@ impl<'p> PagingManager<'p> {
         }
 
     }
+    
     
 }
 

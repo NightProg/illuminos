@@ -16,3 +16,8 @@ pub unsafe fn pci_write(bus: u8, device: u8, function: u8, offset: u8, value: u3
     PCI_CONFIG_ADDRESS.write(address);
     PCI_CONFIG_DATA.write(value);
 }
+
+pub unsafe fn pci_read_bar(bus: u8, device: u8, function: u8, bar_index: usize) -> u32 {
+    let offset = 0x10 + (bar_index as u8 * 4);
+    pci_read(bus, device, function, offset)
+}

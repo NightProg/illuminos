@@ -1,10 +1,11 @@
+use alloc::string::String;
 use core::{fmt::Write, ops::Deref};
 
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
-use crate::{context::GLOBAL_CONTEXT, drivers::keyboard::{Key, KeyEvent, KeyState, SpecialKey}, info};
+use crate::{context::GLOBAL_CONTEXT, drivers::keyboard::{Key, KeyEvent, KeyState, SpecialKey}, info, println};
 
 use super::{font::FONT_DEFAULT, framebuffer::{self, FrameBuffer}, windows::WINDOW_MANAGER, GraphicMode, WHITE};
 
@@ -19,10 +20,21 @@ pub struct TextBuffer {
     pub color: u32,
     pub cursor_x_old: Vec<usize>,
     pub cursor_old_pos: (usize, usize),
-    pub winid: usize
+    pub winid: usize,
+    pub lines: Vec<String>,
+    pub cols: String
 }
 
 impl TextBuffer {
+
+    pub fn create(width: usize, height: usize, x: usize, y: usize) -> Self {
+        let winid = WINDOW_MANAGER.lock().new_window(width + 8, height + 16, x, y);
+
+        let mut new = Self::new(winid);
+        new.init();
+
+        new
+    }
     pub fn new(winid: usize) -> Self {
         TextBuffer {
             width: 0,
@@ -32,6 +44,8 @@ impl TextBuffer {
             cursor_x_old: Vec::new(),
             color: 0xFFFFFF,
             cursor_old_pos: (0, 0),
+            lines: Vec::new(),
+            cols: String::new(),
             winid
         }
     }
@@ -48,7 +62,7 @@ impl TextBuffer {
             .get_window(self.winid)
             .get_virt()
             .frame_buffer()
-            .height() / 16;
+            .height()/ 16;
 
         self.width = width;
         self.height = height;
@@ -77,7 +91,7 @@ impl TextBuffer {
             .get_window_mut(self.winid)
             .get_virt_mut()
             .frame_buffer_mut()
-            .clear_char(x * 8, y * 16);
+            .clear_char(x * 8 - 10, y * 16 - 16);
     }
 
     pub fn draw_string(&mut self, s: &str, x: usize, y: usize) {
@@ -88,13 +102,16 @@ impl TextBuffer {
             .frame_buffer_mut()
             .draw_string(s, x * 8, y * 16, self.color);
     }
-
     pub fn clear(&mut self) {
+        println!("Clear screen");
         for y in 0..self.height {
             for x in 0..self.width {
                 self.clear_char(x, y);
             }
         }
+
+        self.cursor_y = 0;
+        self.cursor_x = 0;
     }
 
 
@@ -112,9 +129,15 @@ impl TextBuffer {
         if c == '\n' {
             self.cursor_x_old.push(self.cursor_x);
             self.cursor_x = 0;
-            self.cursor_y += 1; 
+            self.cursor_y += 1;
+            self.lines.push(
+                self.cols.clone()
+            );
+
+            self.cols = String::new();
 
         } else {
+            self.cols.push(c);
             self.draw_char(c, self.cursor_x, self.cursor_y);
             self.cursor_x += 1;
 
@@ -130,10 +153,24 @@ impl TextBuffer {
         }
 
         if self.cursor_y >= self.height {
-            self.clear();
-            self.cursor_y = 0;
-
+            self.scrolling();
         }
+    }
+
+    pub fn scrolling(&mut self) {
+        // if !self.lines.is_empty() {
+        //     self.lines.remove(0);
+        //     // Adjust the current cursor position
+        //     if self.cursor_y > 0 {
+        //         self.cursor_y -= 1;
+        //     }
+        // }
+        // Clear the text area
+        self.clear();
+        // Redraw the remaining lines
+        // for (y, line) in self.lines.clone().into_iter().enumerate() {
+        //     self.draw_string(&line, 0, y);
+        // }
     }
 
     pub fn remove_char(&mut self) {

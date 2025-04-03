@@ -49,6 +49,11 @@ pub fn set_log_level(level: LogLevel) {
 
 pub fn set_log_output(output: LogOutput) {
     LOGGER.lock().output = output;
+    if let LogOutput::TextBuffer(winid) = output {
+        let mut text_buffer = TextBuffer::new(winid);
+        text_buffer.init();
+        LOGGER.lock().text_buffer = Some(text_buffer);
+    }
 }
 
 
@@ -78,6 +83,7 @@ macro_rules! error {
 pub struct Logger {
     level: LogLevel,
     output: LogOutput,
+    text_buffer: Option<TextBuffer>,
 }
 
 impl Logger {
@@ -85,6 +91,7 @@ impl Logger {
         Logger {
             level,
             output,
+            text_buffer: None,
         }
     }
 }
@@ -94,14 +101,14 @@ impl core::fmt::Write for Logger {
         if self.output == LogOutput::Serial {
             print!("{}", s);
         } else if let LogOutput::TextBuffer(winid) = self.output {
-            let mut text_buffer = TextBuffer::new(winid);
+            let text_buffer = self.text_buffer.as_mut().unwrap();
             text_buffer.set_color(match self.level {
                 LogLevel::Info => BLUE,
                 LogLevel::Warning => YELLOW,
                 LogLevel::Error => RED,
             });
 
-            write!(text_buffer, "{}", s)?;
+            text_buffer.write_string(s);
             
         }
         Ok(())

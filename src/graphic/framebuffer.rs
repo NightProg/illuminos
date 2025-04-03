@@ -2,22 +2,32 @@ use core::{alloc::Layout, ops::{Deref, DerefMut}};
 
 use alloc::alloc::alloc;
 use alloc::boxed::Box;
+use spin::Mutex;
+use core::fmt::Debug;
 use bootloader_api::info::{FrameBuffer as BootFrameBuffer, FrameBufferInfo, PixelFormat};
 
-use crate::{error, info};
+use crate::{context::Context, error, info};
 use crate::context::GLOBAL_CONTEXT;
 use super::font::FONT_DEFAULT;
 
 
 
+#[derive(Debug, Clone)]
 pub struct FrameBuffer {
-    pub frame: BootFrameBuffer
+    addr: u64,
+    info: FrameBufferInfo,
 }
+
+unsafe impl Send for FrameBuffer {}
+unsafe impl Sync for FrameBuffer {}
 
 impl FrameBuffer {
     pub unsafe fn create_from_raw_addr(addr: u64, info: FrameBufferInfo) -> Self {
+        let size = info.width * info.height * info.bytes_per_pixel;
+        info!("Creating framebuffer from raw address: size: {}, width: {}, height: {}, bytes_per_pixel: {}", size, info.width, info.height, info.bytes_per_pixel);
         FrameBuffer {
-            frame: unsafe { BootFrameBuffer::new(addr, info) }
+            addr,
+            info
         }
     }
 
@@ -34,47 +44,47 @@ impl FrameBuffer {
         let mut info = info;
         info.byte_len = size as usize;
         info.stride = info.width;
-        FrameBuffer {
-            frame: unsafe { BootFrameBuffer::new(addr, info) }
-        }
-    }
-
-    pub fn new(frame: BootFrameBuffer) -> Self {
-        FrameBuffer {
-            frame
+        unsafe {
+            FrameBuffer::create_from_raw_addr(addr, info)
         }
     }
 
     pub fn pixel_format(&self) -> PixelFormat {
-        self.frame.info().pixel_format
+        self.info().pixel_format
     }
 
     pub fn byte_per_pixel(&self) -> usize {
-        self.frame.info().bytes_per_pixel
+        self.info().bytes_per_pixel
     }
 
     pub fn stride(&self) -> usize {
-        self.frame.info().stride
+        self.info().stride
     }
 
     pub fn width(&self) -> usize {
-        self.frame.info().width
+        self.info().width
     }
 
     pub fn height(&self) -> usize {
-        self.frame.info().height
+        self.info().height
     }
 
 
     pub fn buffer(&self) -> &[u8] {
-        self.frame.buffer()
+        let buffer = self.addr as *const u8;
+        unsafe {
+            core::slice::from_raw_parts(buffer, self.info().byte_len)
+        }
     }
     pub fn buffer_mut(&mut self) -> &mut [u8] {
-        self.frame.buffer_mut()
+        let buffer = self.addr as *mut u8;
+        unsafe {
+            core::slice::from_raw_parts_mut(buffer, self.info().byte_len)
+        }
     }
 
     pub fn info(&self) -> FrameBufferInfo {
-        self.frame.info()
+        self.info
     }
 
     pub fn get_pixel(&mut self, x: usize, y: usize) -> u32 {
@@ -293,12 +303,11 @@ pub struct VirtualFrameBuffer {
 impl VirtualFrameBuffer {
 
     pub fn global() -> Self {
-        let mut global_context = GLOBAL_CONTEXT.lock();
-        info!("Virtual framebuffer: global context: {:?}", global_context.framebuffer.is_some());
+        let mut context  = GLOBAL_CONTEXT.lock();
         VirtualFrameBuffer {
             x: 0,
             y: 0,
-            framebuffer: global_context.framebuffer.take().unwrap()
+            framebuffer: context.framebuffer.clone().unwrap()
         }
     }
     pub fn new(framebuffer: FrameBuffer) -> Self {
@@ -309,6 +318,13 @@ impl VirtualFrameBuffer {
         }
     }
 
+    pub fn set_width(&mut self, width: usize) {
+        self.framebuffer.info.width = width;
+    }
+
+    pub fn set_height(&mut self, height: usize) {
+        self.framebuffer.info.height = height;
+    }
     pub fn set_position(&mut self, x: usize, y: usize) {
         self.x = x;
         self.y = y;
