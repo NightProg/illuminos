@@ -8,7 +8,7 @@ use bootloader_api::info::{FrameBuffer as BootFrameBuffer, FrameBufferInfo, Pixe
 
 use crate::{context::Context, error, info};
 use crate::context::GLOBAL_CONTEXT;
-use super::font::FONT_DEFAULT;
+use super::{font::FONT_DEFAULT, widget::Widget};
 
 
 
@@ -217,6 +217,12 @@ impl FrameBuffer {
                 }
             }
         }
+    }
+
+    pub fn draw_widget(&mut self, widget: Widget) {
+        widget.draw(
+            self
+        );
     }
         
 

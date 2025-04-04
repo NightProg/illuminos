@@ -104,8 +104,8 @@ impl TextBuffer {
     }
     pub fn clear(&mut self) {
         println!("Clear screen");
-        for y in 0..self.height {
-            for x in 0..self.width {
+        for y in 1..self.height-1 {
+            for x in 1..self.width-1 {
                 self.clear_char(x, y);
             }
         }

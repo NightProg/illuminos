@@ -7,23 +7,7 @@
     <cargoProject FILE="$PROJECT_DIR$/Cargo.toml" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="103bfe35-118c-4e47-954c-c80d87fc5559" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/disk3.img" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/illuminos-uefi.img" beforeDir="false" afterPath="$PROJECT_DIR$/illuminos-uefi.img" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/allocator/paging.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/allocator/paging.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/context.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/context.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/graphic/app.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/graphic/app.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/graphic/console.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/graphic/console.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/graphic/framebuffer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/graphic/framebuffer.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/graphic/text.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/graphic/text.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/graphic/vram.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/graphic/vram.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/graphic/windows.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/graphic/windows.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/io/pci.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/io/pci.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/log.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/log.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
-    </list>
+    <list default="true" id="103bfe35-118c-4e47-954c-c80d87fc5559" name="Changes" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -156,7 +140,7 @@
       <workItem from="1743612397534" duration="9225000" />
       <workItem from="1743669211603" duration="3991000" />
       <workItem from="1743682641038" duration="1288000" />
-      <workItem from="1743702168310" duration="8922000" />
+      <workItem from="1743702168310" duration="9296000" />
     </task>
     <servers />
   </component>

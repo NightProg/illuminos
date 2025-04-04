@@ -13,6 +13,7 @@ pub mod text;
 pub mod windows;
 pub mod app;
 pub mod console;
+pub mod widget;
 
 pub const RED: u32 = 0xFF0000;
 pub const GREEN: u32 = 0x00FF00;
