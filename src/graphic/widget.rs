@@ -3,7 +3,7 @@ use bootloader_api::info::FrameBufferInfo;
 use x86_64::structures::paging::frame;
 
 use super::{font::FONT_DEFAULT, framebuffer::{FrameBuffer, VirtualFrameBuffer}};
-
+use alloc::vec;
 
 
 pub struct Widget {
@@ -16,7 +16,7 @@ pub struct Widget {
 
 impl Widget {
     pub fn new(info: FrameBufferInfo, x: usize, y: usize) -> Self {
-        let buffer = vec![0; width * height * 4];
+        let buffer = vec![0; info.width * info.height * 4];
         Widget {
             x,
             y,
@@ -47,8 +47,8 @@ impl Widget {
             for row in 0..self.info.height {
                 for col in 0..self.info.width {
                     if glyph[row] & (1 << (7 - col)) != 0 {
-                        if x + col < self.info.width && y + row < self.info.height {
-                            let index = (y + row) * self.info.width + (x + col);
+                        if self.x + col < self.info.width && self.y + row < self.info.height {
+                            let index = (self.y + row) * self.info.width + (self.x + col);
                             let pixel_index = index * self.info.bytes_per_pixel;
                             for k in 0..self.info.bytes_per_pixel {
                                 self.buffer[pixel_index + k] = (self.color >> (8 * k)) as u8;

@@ -66,6 +66,7 @@ unsafe fn inb(port: u16) -> u8 {
 }
 
 
+
 #[macro_export]
 macro_rules! print_serial {
     ($($arg:tt)*) => ({

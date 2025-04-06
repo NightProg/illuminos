@@ -1,6 +1,6 @@
+use alloc::vec::Vec;
 use core::ptr::read_volatile;
 use core::ptr::write_volatile;
-use alloc::vec::Vec;
 use x86_64::instructions::port::{Port, PortRead, PortWrite};
 
 const ATA_PRIMARY_IO: u16 = 0x1F0;
@@ -46,21 +46,25 @@ impl AtaPio {
 
     pub fn detect_disks() -> Vec<AtaPio> {
         let mut disks = Vec::new();
-        let controllers = [(ATA_PRIMARY_IO, ATA_PRIMARY_CONTROL), (ATA_SECONDARY_IO, ATA_SECONDARY_CONTROL)];
+        let controllers = [
+            (ATA_PRIMARY_IO, ATA_PRIMARY_CONTROL),
+            (ATA_SECONDARY_IO, ATA_SECONDARY_CONTROL),
+        ];
         let drives = [0xA0, 0xB0]; // Maître et Esclave
-        
+
         for &(base, control) in &controllers {
             for &drive in &drives {
                 let mut drive_select = Port::<u8>::new(base + 6);
                 unsafe {
                     drive_select.write(drive);
                 }
-                
+
                 // Lire le status
                 let mut status = Port::<u8>::new(base + 7);
                 let value = unsafe { status.read() };
-                
-                if value != 0xFF { // Vérifier si un disque est présent
+
+                if value != 0xFF {
+                    // Vérifier si un disque est présent
                     let mut disk = AtaPio::new(base, control, drive);
                     disk.total_sectors = disk.get_total_sectors();
                     disks.push(disk);
@@ -79,14 +83,14 @@ impl AtaPio {
             self.drive_select.write(0xE0);
             self.command.write(0xEC);
         }
-        
+
         while unsafe { self.status.read() } & 0x80 != 0 {}
-        
+
         let mut buffer = [0u16; 256];
         for i in 0..256 {
             buffer[i] = unsafe { self.data.read() };
         }
-        
+
         let total_sectors = ((buffer[61] as u32) << 16) | (buffer[60] as u32);
         total_sectors
     }
@@ -100,9 +104,9 @@ impl AtaPio {
             self.lba_hi.write((lba >> 16) as u8);
             self.command.write(0x20);
         }
-        
+
         while unsafe { self.status.read() } & 0x80 != 0 {}
-        
+
         for i in 0..256 {
             buffer[i] = unsafe { self.data.read() };
         }
@@ -117,9 +121,9 @@ impl AtaPio {
             self.lba_hi.write((lba >> 16) as u8);
             self.command.write(0x20);
         }
-        
+
         while unsafe { self.status.read() } & 0x80 != 0 {}
-        
+
         for i in 0..256 {
             let word = unsafe { self.data.read() };
             buffer[i * 2] = (word & 0xFF) as u8;
@@ -136,9 +140,9 @@ impl AtaPio {
             self.lba_hi.write((lba >> 16) as u8);
             self.command.write(0x30);
         }
-        
+
         while unsafe { self.status.read() } & 0x80 != 0 {}
-        
+
         for i in 0..256 {
             unsafe { self.data.write(buffer[i]) };
         }
@@ -153,9 +157,9 @@ impl AtaPio {
             self.lba_hi.write((lba >> 16) as u8);
             self.command.write(0x30);
         }
-        
+
         while unsafe { self.status.read() } & 0x80 != 0 {}
-        
+
         for i in 0..256 {
             let word = (buffer[i * 2] as u16) | ((buffer[i * 2 + 1] as u16) << 8);
             unsafe { self.data.write(word) };
@@ -166,49 +170,63 @@ impl AtaPio {
         // Envoie la commande IDENTIFY DEVICE
         unsafe {
             self.drive_select.write(0xE0);
-            self.command.write(0xEC);  // IDENTIFY DEVICE
+            self.command.write(0xEC); // IDENTIFY DEVICE
         }
-    
+
         // Attendre que le statut indique que l'opération est terminée
         while unsafe { self.status.read() } & 0x80 != 0 {}
-    
-        let mut buffer = [0u16; 256];  // Le buffer est de 512 octets (256 mots de 16 bits)
-        
+
+        let mut buffer = [0u16; 256]; // Le buffer est de 512 octets (256 mots de 16 bits)
+
         // Lire les 256 mots (512 octets) dans le buffer
         for i in 0..256 {
             buffer[i] = unsafe { self.data.read() };
         }
-    
+
         // La taille du secteur est généralement stockée à l'index 212 et 213 dans le buffer.
         // La valeur à cet endroit représente la taille du secteur en octets (généralement 512).
         let sector_size = buffer[212] as u32;
-    
+
         sector_size
     }
 
     pub fn get_identify_buffer(&mut self) -> [u16; 256] {
         unsafe {
             self.drive_select.write(0xE0);
-            self.command.write(0xEC);  // IDENTIFY DEVICE
+            self.command.write(0xEC); // IDENTIFY DEVICE
         }
-    
+
         while unsafe { self.status.read() } & 0x80 != 0 {}
-    
+
         let mut buffer = [0u16; 256];
         for i in 0..256 {
             buffer[i] = unsafe { self.data.read() };
         }
-    
+
         buffer
     }
 
     pub fn flush_cache(&mut self) {
         unsafe {
             self.drive_select.write(0xE0);
-            self.command.write(0xE7);  // FLUSH CACHE
+            self.command.write(0xE7); // FLUSH CACHE
         }
-    
+
         while unsafe { self.status.read() } & 0x80 != 0 {}
     }
-    
+}
+
+impl super::Disk for AtaPio {
+    fn read_sector(&mut self, sector: u64) -> Vec<u8> {
+        let mut buffer = [0; 512];
+
+        self.read_sector8(sector as u32, &mut buffer);
+        buffer.to_vec()
+    }
+
+    fn write_sector(&mut self, sector: u64, data: &[u8]) {
+        self.write_sector8(sector as u32, data.try_into().unwrap());
+
+        self.flush_cache();
+    }
 }

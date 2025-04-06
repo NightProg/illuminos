@@ -5,6 +5,8 @@ use lazy_static::lazy_static;
 use spin::Mutex;
 use crate::drivers::keyboard::KeyEvent;
 use crate::graphic::framebuffer::FrameBuffer;
+use crate::graphic::windows::WindowManager;
+use crate::graphic::windows::WINDOW_MANAGER;
 
 lazy_static! {
     pub static ref APP_MANAGER: Mutex<AppManager> = Mutex::new(AppManager::new());
@@ -39,7 +41,9 @@ impl AppManager {
     
     pub fn init(&mut self) {
         for app in &mut self.apps {
-            app.lock().window();
+            app.lock().window(
+                &mut *WINDOW_MANAGER.lock()
+            );
         }
     }
     
@@ -59,7 +63,7 @@ impl AppManager {
 }
 
 pub trait Application: Send + Sync {
-    fn window(&mut self) -> usize;
+    fn window(&mut self, window_manager: &mut WindowManager) -> usize;
 
     fn handle_keyboard_event(&mut self, event: KeyEvent);
 

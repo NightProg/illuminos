@@ -124,11 +124,9 @@ impl Console {
 }
 
 impl Application for Console {
-    fn window(&mut self) -> usize {
-        // let head_window = WindowManager::head();
-        let mut windows_manager = WINDOW_MANAGER.lock();
-        let console = windows_manager.new_window(600, 800, 0, 0);
-        let buffer = windows_manager.new_window(600,800, 800, 0);
+    fn window(&mut self, window_manager: &mut WindowManager) -> usize {
+        let console = window_manager.new_window(600, 800, 0, 800);
+        let buffer = window_manager.new_window(600,800, 800, 0);
         self.set_window_id(console, buffer);
         self.winid
     }

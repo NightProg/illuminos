@@ -1,6 +1,7 @@
 use x86_64::instructions::port::Port;
 
 pub mod pci;
+pub mod port;
 pub mod serial;
 
 pub fn outb(port: u16, value: u8) {
@@ -9,15 +10,11 @@ pub fn outb(port: u16, value: u8) {
     }
 }
 pub fn inb(port: u16) -> u8 {
-    unsafe {
-        Port::new(port).read()
-    }
+    unsafe { Port::new(port).read() }
 }
 
 pub fn inw(port: u16) -> u16 {
-    unsafe {
-        Port::new(port).read()
-    }
+    unsafe { Port::new(port).read() }
 }
 
 pub fn outw(port: u16, value: u16) {
@@ -27,9 +24,7 @@ pub fn outw(port: u16, value: u16) {
 }
 
 pub fn inl(port: u16) -> u32 {
-    unsafe {
-        Port::new(port).read()
-    }
+    unsafe { Port::new(port).read() }
 }
 
 pub fn outl(port: u16, value: u32) {
