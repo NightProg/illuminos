@@ -22,7 +22,7 @@ impl Widget {
         let mut virt = virt;
         let width = virt.frame_buffer().width();
         let height = virt.frame_buffer().height();
-        virt.frame_buffer_mut().draw_rect_no_fill(0, 0, width, height, 0x808080);
+        virt.draw_rect_no_fill(0, 0, width, height, 0x808080);
         Widget { virt, widget_id }
     }
 
@@ -40,7 +40,7 @@ impl Widget {
 
     pub fn move_to(&mut self, x: usize, y: usize) {
         let (old_x, old_y) = self.virt.get_position();
-        let frame_buffer = self.virt.frame_buffer_mut();
+        let frame_buffer = self.virt.frame_buffer();
         let width = frame_buffer.width();
         let height = frame_buffer.height();
 
@@ -48,31 +48,27 @@ impl Widget {
 
         for i in 0..width {
             for j in 0..height {
-                let pixel = frame_buffer.get_pixel(old_x + i, old_y + j);
+                let pixel = self.virt.get_pixel(old_x + i, old_y + j);
                 v.push(pixel);
-                frame_buffer.draw_pixel(old_x + i, old_y + j, 0x000000);
+                self.virt.draw_pixel(old_x + i, old_y + j, 0x000000);
             }
-        } 
+        }
 
         for i in 0..width {
             for j in 0..height {
                 let pixel = v[j + i * width];
-                frame_buffer.draw_pixel(x + i, y + j, pixel);
+                self.virt.draw_pixel(x + i, y + j, pixel);
             }
         }
-        let frame_buffer = self.virt.frame_buffer_mut();
-        let width = frame_buffer.width();
-        let height = frame_buffer.height();
-        frame_buffer.draw_rect_no_fill(x, y, width - x, height - y, 0x808080);
+        self.virt
+            .draw_rect_no_fill(x, y, width - x, height - y, 0x808080);
 
         self.virt.set_position(x, y);
-
-        self.sync();
-
     }
 
     pub fn sync(&mut self) {
-        self.virt.render(GLOBAL_CONTEXT.lock().framebuffer.as_mut().unwrap());
+        self.virt
+            .render(GLOBAL_CONTEXT.lock().framebuffer.as_mut().unwrap());
     }
 }
 
@@ -90,12 +86,12 @@ impl Window {
     }
 
     pub fn clear(&mut self) {
-        let frame_buffer = self.virt.frame_buffer_mut();
+        let frame_buffer = self.virt.frame_buffer();
         let width = frame_buffer.width();
         let height = frame_buffer.height();
         for i in 0..width {
             for j in 0..height {
-                frame_buffer.draw_pixel(i, j, 0x000000);
+                self.virt.draw_pixel(i, j, 0x000000);
             }
         }
     }
@@ -114,29 +110,29 @@ impl Window {
 
     pub fn move_to(&mut self, x: usize, y: usize) {
         let (old_x, old_y) = self.virt.get_position();
-        let frame_buffer = self.virt.frame_buffer_mut();
+        let frame_buffer = self.virt.frame_buffer();
         let width = frame_buffer.width();
         let height = frame_buffer.height();
 
         // let mut v: Vec<_> = Vec::new();
 
-        info!("Moving window from ({}, {}) to ({}, {})", old_x, old_y, x, y);
+        info!(
+            "Moving window from ({}, {}) to ({}, {})",
+            old_x, old_y, x, y
+        );
         let mut global_context = GLOBAL_CONTEXT.lock();
         let global_framebuffer = global_context.framebuffer.as_mut().unwrap();
-        for i in 0..width+1 {
+        for i in 0..width + 1 {
             for j in 0..height {
                 global_framebuffer.draw_pixel(old_x + i, old_y + j, 0x000000);
             }
-        } 
+        }
         self.virt.set_position(x, y);
-
     }
 
     pub fn sync(&mut self, frame_buffer: &mut FrameBuffer) {
         self.virt.render(frame_buffer);
     }
-
-
 }
 
 pub struct WindowManager {
@@ -165,21 +161,10 @@ impl WindowManager {
     pub fn new_window(&mut self, width: usize, height: usize, x: usize, y: usize) -> usize {
         let global_context = GLOBAL_CONTEXT.lock();
         let global_framebuffer = global_context.framebuffer.as_ref().unwrap();
-        let framebuffer = unsafe {
-            FrameBuffer::alloc(
-                FrameBufferInfo {
-                    width,
-                    height,
-                    ..global_framebuffer.info()
-                }
-            )
-        };
-        let mut virt_framebuffer = VirtualFrameBuffer::new(
-            framebuffer
-        );
+        let mut virt_framebuffer = VirtualFrameBuffer::new(*global_framebuffer.clone());
 
         virt_framebuffer.set_position(x, y);
-        virt_framebuffer.frame_buffer_mut().draw_rect_no_fill(0, 0, width, height, 0xAAAAAA);
+        virt_framebuffer.draw_rect_no_fill(0, 0, width, height, 0xAAAAAA);
         let window = Window::new(virt_framebuffer, self.windows.len(), x, y);
         self.windows.push(window);
         self.current_window = self.windows.len() - 1;
@@ -217,5 +202,4 @@ impl WindowManager {
             window.sync(frame_buffer);
         }
     }
-
 }

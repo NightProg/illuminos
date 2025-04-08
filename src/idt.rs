@@ -13,7 +13,7 @@ use crate::{
     drivers::keyboard::{KEYBOARD, Keyboard},
     info,
     io::serial::SerialPortWriter,
-    print, println,
+    print, println, println_serial,
 };
 
 pub static PICS: Mutex<ChainedPics> = Mutex::new(unsafe {
@@ -104,6 +104,7 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 
     let scancode = KEYBOARD.lock().read_key();
     if let Some(key) = scancode {
+        println_serial!("FOUND A KEY");
         KEYBOARD.lock().handle_key(key, &GLOBAL_CONTEXT);
     }
     unsafe { PICS.lock().notify_end_of_interrupt(33) };

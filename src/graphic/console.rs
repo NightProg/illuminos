@@ -1,11 +1,15 @@
 use alloc::string::{String, ToString};
 
-use crate::{drivers::keyboard::Key, error};
+use super::{
+    GraphicMode,
+    app::Application,
+    windows::{WINDOW_MANAGER, Window},
+};
+use crate::graphic::framebuffer::FrameBuffer;
 use crate::graphic::text::{TextBuffer, TextEdit};
 use crate::graphic::windows::WindowManager;
-use super::{app::Application, windows::{Window, WINDOW_MANAGER}, GraphicMode};
+use crate::{drivers::keyboard::Key, error};
 use core::fmt::Write;
-use crate::graphic::framebuffer::FrameBuffer;
 
 pub enum ConsoleCommand {
     Clear,
@@ -60,7 +64,7 @@ impl Expr {
 pub struct Console {
     winid: usize,
     current_cmd: String,
-    text_edit: TextEdit
+    text_edit: TextEdit,
 }
 
 impl Console {
@@ -68,10 +72,9 @@ impl Console {
         Console {
             winid: 0,
             current_cmd: String::new(),
-            text_edit: TextEdit::new(0)
+            text_edit: TextEdit::new(0),
         }
     }
-
 
     pub fn text_buffer_mut(&mut self) -> &mut TextBuffer {
         &mut self.text_edit.text_buffer
@@ -109,9 +112,15 @@ impl Console {
         let mut window = WINDOW_MANAGER.lock();
         let win = window.get_window_mut(self.winid);
         match expr {
-            Expr::String(s) => write!(self.text_buffer_mut(), "{}: {}", win.get_window_id(), s).unwrap(),
-            Expr::Number(n) => write!(self.text_buffer_mut(), "{}: {}", win.get_window_id(), n).unwrap(),
-            Expr::Bool(b) => write!(self.text_buffer_mut(), "{}: {}", win.get_window_id(), b).unwrap(),
+            Expr::String(s) => {
+                write!(self.text_buffer_mut(), "{}: {}", win.get_window_id(), s).unwrap()
+            }
+            Expr::Number(n) => {
+                write!(self.text_buffer_mut(), "{}: {}", win.get_window_id(), n).unwrap()
+            }
+            Expr::Bool(b) => {
+                write!(self.text_buffer_mut(), "{}: {}", win.get_window_id(), b).unwrap()
+            }
         }
     }
 
@@ -119,14 +128,12 @@ impl Console {
         self.print(expr);
         self.text_buffer_mut().write('\n');
     }
-
-    
 }
 
 impl Application for Console {
     fn window(&mut self, window_manager: &mut WindowManager) -> usize {
         let console = window_manager.new_window(600, 800, 0, 800);
-        let buffer = window_manager.new_window(600,800, 800, 0);
+        let buffer = window_manager.new_window(600, 800, 800, 0);
         self.set_window_id(console, buffer);
         self.winid
     }
@@ -134,9 +141,4 @@ impl Application for Console {
     fn handle_keyboard_event(&mut self, event: crate::drivers::keyboard::KeyEvent) {
         self.text_edit.handle_keyboard_event(event);
     }
-
-    fn refresh(&mut self, frame_buffer: &mut FrameBuffer) {
-        WINDOW_MANAGER.lock().sync(frame_buffer)
-    }
-
 }

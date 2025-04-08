@@ -1,16 +1,17 @@
-use core::{alloc::Layout, ops::{Deref, DerefMut}};
+use core::{
+    alloc::Layout,
+    ops::{Deref, DerefMut},
+};
 
 use alloc::alloc::alloc;
 use alloc::boxed::Box;
-use spin::Mutex;
-use core::fmt::Debug;
 use bootloader_api::info::{FrameBuffer as BootFrameBuffer, FrameBufferInfo, PixelFormat};
+use core::fmt::Debug;
+use spin::Mutex;
 
-use crate::{context::Context, error, info};
-use crate::context::GLOBAL_CONTEXT;
 use super::{font::FONT_DEFAULT, widget::Widget};
-
-
+use crate::context::GLOBAL_CONTEXT;
+use crate::{context::Context, error, info};
 
 #[derive(Debug, Clone)]
 pub struct FrameBuffer {
@@ -24,16 +25,19 @@ unsafe impl Sync for FrameBuffer {}
 impl FrameBuffer {
     pub unsafe fn create_from_raw_addr(addr: u64, info: FrameBufferInfo) -> Self {
         let size = info.width * info.height * info.bytes_per_pixel;
-        info!("Creating framebuffer from raw address: size: {}, width: {}, height: {}, bytes_per_pixel: {}", size, info.width, info.height, info.bytes_per_pixel);
-        FrameBuffer {
-            addr,
-            info
-        }
+        info!(
+            "Creating framebuffer from raw address: size: {}, width: {}, height: {}, bytes_per_pixel: {}",
+            size, info.width, info.height, info.bytes_per_pixel
+        );
+        FrameBuffer { addr, info }
     }
 
     pub unsafe fn alloc(info: FrameBufferInfo) -> Self {
         let size = info.width * info.height * info.bytes_per_pixel;
-        info!("Allocating framebuffer: size: {}, width: {}, height: {}, bytes_per_pixel: {}", size, info.width, info.height, info.bytes_per_pixel);
+        info!(
+            "Allocating framebuffer: size: {}, width: {}, height: {}, bytes_per_pixel: {}",
+            size, info.width, info.height, info.bytes_per_pixel
+        );
         let addr = unsafe {
             let ptr = alloc(Layout::from_size_align(size as usize, 4).unwrap());
             if ptr.is_null() {
@@ -44,9 +48,7 @@ impl FrameBuffer {
         let mut info = info;
         info.byte_len = size as usize;
         info.stride = info.width;
-        unsafe {
-            FrameBuffer::create_from_raw_addr(addr, info)
-        }
+        unsafe { FrameBuffer::create_from_raw_addr(addr, info) }
     }
 
     pub fn pixel_format(&self) -> PixelFormat {
@@ -69,18 +71,13 @@ impl FrameBuffer {
         self.info().height
     }
 
-
     pub fn buffer(&self) -> &[u8] {
         let buffer = self.addr as *const u8;
-        unsafe {
-            core::slice::from_raw_parts(buffer, self.info().byte_len)
-        }
+        unsafe { core::slice::from_raw_parts(buffer, self.info().byte_len) }
     }
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         let buffer = self.addr as *mut u8;
-        unsafe {
-            core::slice::from_raw_parts_mut(buffer, self.info().byte_len)
-        }
+        unsafe { core::slice::from_raw_parts_mut(buffer, self.info().byte_len) }
     }
 
     pub fn info(&self) -> FrameBufferInfo {
@@ -95,15 +92,24 @@ impl FrameBuffer {
         let height = self.height();
 
         if x >= width || y >= height {
-            error!("Coordinates out of bounds: x: {}, y: {}, width: {}, height: {}", x, y, width, height);
+            error!(
+                "Coordinates out of bounds: x: {}, y: {}, width: {}, height: {}",
+                x, y, width, height
+            );
             return 0;
         }
 
         let offset = (y * stride + x) as usize * bytes_per_pixel;
         let buffer = self.buffer_mut();
         if offset + bytes_per_pixel > buffer.len() {
-            error!("Buffer overflow: offset {}, bytes_per_pixel {}, buffer length {} buffer stride {}", offset, bytes_per_pixel, buffer.len(), stride);
-            return 0; 
+            error!(
+                "Buffer overflow: offset {}, bytes_per_pixel {}, buffer length {} buffer stride {}",
+                offset,
+                bytes_per_pixel,
+                buffer.len(),
+                stride
+            );
+            return 0;
         }
 
         match pixel_format {
@@ -131,8 +137,13 @@ impl FrameBuffer {
         let offset = (y * stride + x) as usize * bytes_per_pixel;
         let buffer = self.buffer_mut();
         if offset + bytes_per_pixel > buffer.len() {
-            error!("Buffer overflow: offset {}, bytes_per_pixel {}, buffer length {}", offset, bytes_per_pixel, buffer.len());
-            return; 
+            error!(
+                "Buffer overflow: offset {}, bytes_per_pixel {}, buffer length {}",
+                offset,
+                bytes_per_pixel,
+                buffer.len()
+            );
+            return;
         }
         match pixel_format {
             PixelFormat::Bgr => {
@@ -168,7 +179,8 @@ impl FrameBuffer {
                     }
                     PixelFormat::Rgb => {
                         for i in 0..bytes_per_pixel {
-                            self.buffer_mut()[offset + i] = ((color >> (8 * (bytes_per_pixel - 1 - i))) & 0xFF) as u8;
+                            self.buffer_mut()[offset + i] =
+                                ((color >> (8 * (bytes_per_pixel - 1 - i))) & 0xFF) as u8;
                         }
                     }
                     _ => {}
@@ -190,7 +202,14 @@ impl FrameBuffer {
         }
     }
 
-    pub fn draw_rect_no_fill(&mut self, x: usize, y: usize, width: usize, height: usize, color: u32) {
+    pub fn draw_rect_no_fill(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        color: u32,
+    ) {
         let screen_width = self.width();
         let screen_height = self.height();
 
@@ -220,11 +239,8 @@ impl FrameBuffer {
     }
 
     pub fn draw_widget(&mut self, widget: Widget) {
-        widget.draw(
-            self
-        );
+        widget.draw(self);
     }
-        
 
     pub fn draw_string(&mut self, text: &str, x: usize, y: usize, color: u32) {
         FONT_DEFAULT.draw_string(text, x, y, self, color);
@@ -234,22 +250,16 @@ impl FrameBuffer {
         FONT_DEFAULT.draw_char(c, x, y, self, color);
     }
 
-
     pub fn clear_char(&mut self, x: usize, y: usize) {
         FONT_DEFAULT.clear_char(x, y, self);
     }
-
-
 }
-
-
 
 #[derive(Debug, Clone, Copy)]
 pub enum GraphicMode {
-    Text, 
-    Graphics 
+    Text,
+    Graphics,
 }
-
 
 pub struct DoubleBuffer {
     pub framebuffer: FrameBuffer,
@@ -283,7 +293,6 @@ impl DoubleBuffer {
             &self.framebuffer2
         }
     }
-
 }
 
 impl Deref for DoubleBuffer {
@@ -294,7 +303,7 @@ impl Deref for DoubleBuffer {
     }
 }
 
-impl DerefMut for DoubleBuffer {    
+impl DerefMut for DoubleBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.current_mut()
     }
@@ -307,20 +316,19 @@ pub struct VirtualFrameBuffer {
 }
 
 impl VirtualFrameBuffer {
-
     pub fn global() -> Self {
-        let mut context  = GLOBAL_CONTEXT.lock();
+        let mut context = GLOBAL_CONTEXT.lock();
         VirtualFrameBuffer {
             x: 0,
             y: 0,
-            framebuffer: context.framebuffer.clone().unwrap()
+            framebuffer: context.framebuffer.clone().unwrap(),
         }
     }
     pub fn new(framebuffer: FrameBuffer) -> Self {
         VirtualFrameBuffer {
             x: 0,
             y: 0,
-            framebuffer: Box::new(framebuffer)
+            framebuffer: Box::new(framebuffer),
         }
     }
 
@@ -348,24 +356,63 @@ impl VirtualFrameBuffer {
         for j in 0..height {
             for i in 0..width {
                 if self.x + i >= screen_width || self.y + j >= screen_height {
-                    error!("Virtual framebuffer out of bounds: x: {}, y: {}", self.x + i, self.y + j);
+                    error!(
+                        "Virtual framebuffer out of bounds: x: {}, y: {}",
+                        self.x + i,
+                        self.y + j
+                    );
                     continue;
                 }
                 let pixel = &self.framebuffer.get_pixel(i, j);
 
                 head_framebuffer.draw_pixel(self.x + i, self.y + j, *pixel);
-
-
             }
-
         }
     }
 
-    pub fn frame_buffer_mut(&mut self) -> &mut FrameBuffer {
-        &mut self.framebuffer
+    pub fn clear_screen(&mut self, color: u32) {
+        self.framebuffer.clear_screen(color);
     }
 
-    pub fn frame_buffer(&self) -> &FrameBuffer {
-        &self.framebuffer
+    pub fn draw_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: u32) {
+        self.framebuffer
+            .draw_rect(self.x + x, self.y + y, width, height, color);
+    }
+
+    pub fn draw_rect_no_fill(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        color: u32,
+    ) {
+        self.framebuffer
+            .draw_rect_no_fill(self.x + x, self.y + y, width, height, color);
+    }
+
+    pub fn draw_string(&mut self, text: &str, x: usize, y: usize, color: u32) {
+        self.framebuffer
+            .draw_string(text, self.x + x, self.y + y, color);
+    }
+
+    pub fn draw_char(&mut self, c: char, x: usize, y: usize, color: u32) {
+        self.framebuffer.draw_char(c, self.x + x, self.y + y, color);
+    }
+
+    pub fn clear_char(&mut self, x: usize, y: usize) {
+        self.framebuffer.clear_char(x + self.x, y + self.y);
+    }
+
+    pub fn draw_pixel(&mut self, x: usize, y: usize, color: u32) {
+        self.framebuffer.draw_pixel(x + self.x, y + self.y, color);
+    }
+
+    pub fn get_pixel(&mut self, x: usize, y: usize) -> u32 {
+        self.framebuffer.get_pixel(x + self.x, y + self.y)
+    }
+
+    pub fn frame_buffer(&self) -> FrameBuffer {
+        *self.framebuffer.clone()
     }
 }

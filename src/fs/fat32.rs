@@ -320,8 +320,6 @@ impl FAT32 {
 
         let sector = self.cluster_to_sector(new_cluster);
         ata.write_sector8(sector, &buffer);
-
-        // Ajouter l'entrée dans le parent
         let mut new_entry = DirectoryEntry {
             name: [b' '; 11],
             attr: 0x10,

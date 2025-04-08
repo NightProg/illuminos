@@ -1,6 +1,7 @@
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::vec;
 
 use crate::drivers::disk::Disk;
 use crate::{info, math};
@@ -94,6 +95,42 @@ impl Ext2SuperBlock {
 
         buffer
     }
+
+    pub fn write_block(
+        &self,
+        block_id: u32,
+        disk: &mut impl Disk,
+        buf: &[u8],
+    ) -> Result<(), String> {
+        let block_size = self.block_size();
+        let mut buf = buf.to_vec();
+        if (block_size as usize) > buf.len() {
+            buf.resize(block_size as usize, 0);
+        }
+
+        let sectors = self.get_sector_for_block(block_id);
+        let mut off = 0;
+        for sector in sectors {
+            disk.write_sector(sector as u64, &buf[off..off + 512]);
+            off += 512;
+        }
+        Ok(())
+    }
+
+    pub fn flush(&mut self, disk: &mut impl Disk) {
+        let s = unsafe {
+            core::slice::from_raw_parts(
+                self as *const Ext2SuperBlock as *const u8,
+                core::mem::size_of::<Self>(),
+            )
+        };
+
+        let mut v = Vec::new();
+        v.extend_from_slice(&s);
+        v.resize(512, 0);
+
+        disk.write_sector(2,&v);
+    }
 }
 
 pub const FS_STATE_CLEAN: u32 = 1;
@@ -148,6 +185,18 @@ impl Ext2ExtendedSuperBlock {
 
     pub fn read_only_feature(&self) -> Ext2ReadOnlyFeature {
         Ext2ReadOnlyFeature::from(self.no_supported_feature)
+    }
+
+    pub fn flush(&self, disk: &mut impl Disk) {
+        let x = unsafe {
+            core::slice::from_raw_parts(
+                self as *const Self as *const u8,
+                core::mem::size_of::<Self>(),
+            )
+        };
+        let mut v = Vec::with_capacity(512);
+        v.extend_from_slice(&x);
+        disk.write_sector(3, &v);
     }
 }
 
@@ -267,6 +316,26 @@ impl Ext2BlockGroupDescriptor {
 
         Some(v)
     }
+
+    pub fn flush(&self, superblock: Ext2SuperBlock, disk: &mut impl Disk) -> Result<(), String> {
+        let x = unsafe {
+            core::slice::from_raw_parts(
+                self as *const Ext2BlockGroupDescriptor as *const u8,
+                core::mem::size_of::<Self>(),
+            )
+        };
+        let mut v = Vec::with_capacity(512);
+        v.extend_from_slice(&x);
+        superblock.write_block(
+            if superblock.block_size() == 1024 {
+                2
+            } else {
+                1
+            },
+            disk,
+            &v,
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -356,11 +425,36 @@ pub const INODE_FLAG_AFS_DIR: u32 = 0x20000;
 pub const INODE_FLAG_JOURNAL_FILE_DATA: u32 = 0x40000;
 
 impl Inode {
+    pub fn new() -> Self {
+        Inode {
+            type_and_perm: 0,
+            user_id: 0,
+            size_low: 0,
+            last_access_time: 0,
+            creation_time: 0,
+            last_modif_time: 0,
+            del_time: 0,
+            group_id: 0,
+            hard_link_count: 0,
+            disk_sector_count: 0,
+            flags: 0,
+            os_spec0: 0,
+            dbp: [0; 12],
+            sibp: 0,
+            dibp: 0,
+            tibp: 0,
+            generation_number: 0,
+            extended_attr_block: 0,
+            size_high_or_acl: 0,
+            block_addr: 0,
+            os_spec1: [0; 44],
+        }
+    }
     pub fn from_buffer(buf: &[u8]) -> Option<Inode> {
         unsafe { (buf.as_ptr() as *const Inode).as_ref().cloned() }
     }
     pub fn type_(&self) -> u16 {
-        (self.type_and_perm >> 12) & 0xF
+        ((self.type_and_perm & 0xF000) >> 12)
     }
 
     pub fn perm(&self) -> u16 {
@@ -368,16 +462,49 @@ impl Inode {
     }
 
     pub fn is_dir(&self) -> bool {
-        self.type_() & INODE_TYPE_DIR != 0
+        self.type_() & (INODE_TYPE_DIR >> 12) != 0
     }
 
     pub fn is_file(&self) -> bool {
-        self.type_() & INODE_TYPE_REG != 0
+        self.type_() & (INODE_TYPE_REG >> 12) != 0
+    }
+
+    pub fn flush(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+
+        b.extend_from_slice(&self.type_and_perm.to_le_bytes());
+        b.extend_from_slice(&self.user_id.to_le_bytes());
+        b.extend_from_slice(&self.size_low.to_le_bytes());
+        b.extend_from_slice(&self.last_access_time.to_le_bytes());
+        b.extend_from_slice(&self.creation_time.to_le_bytes());
+        b.extend_from_slice(&self.last_modif_time.to_le_bytes());
+        b.extend_from_slice(&self.del_time.to_le_bytes());
+        b.extend_from_slice(&self.group_id.to_le_bytes());
+        b.extend_from_slice(&self.hard_link_count.to_le_bytes());
+        b.extend_from_slice(&self.disk_sector_count.to_le_bytes());
+        b.extend_from_slice(&self.flags.to_le_bytes());
+        b.extend_from_slice(&self.os_spec0.to_le_bytes());
+        for i in 0..12 {
+            b.extend_from_slice(&self.dbp[i].to_le_bytes());
+        }
+        b.extend_from_slice(&self.sibp.to_le_bytes());
+        b.extend_from_slice(&self.dibp.to_le_bytes());
+        b.extend_from_slice(&self.tibp.to_le_bytes());
+        b.extend_from_slice(&self.generation_number.to_le_bytes());
+        b.extend_from_slice(&self.extended_attr_block.to_le_bytes());
+        b.extend_from_slice(&self.size_high_or_acl.to_le_bytes());
+        b.extend_from_slice(&self.block_addr.to_le_bytes());
+
+        for i in 0..44 {
+            b.push(self.os_spec1[i]);
+        }
+
+        b
     }
 }
 
 #[derive(Debug, Clone, Default)]
-#[repr(C)]
+#[repr(C, align(4))]
 pub struct DirectoryEntry {
     pub inode: u32,
     pub entry_size: u16,
@@ -404,9 +531,56 @@ impl DirectoryEntry {
         })
     }
 
-    pub fn name(&self) -> &str {
-        core::str::from_utf8(&self.name).unwrap()
+    pub fn name(&self) -> Option<&str> {
+        core::str::from_utf8(&self.name).ok()
     }
+
+    pub fn file_type(&self) -> Option<DirTypeIndicator> {
+        Some(match self.file_type {
+            0 => DirTypeIndicator::Unknown,
+            1 => DirTypeIndicator::RegFile,
+            2 => DirTypeIndicator::Dir,
+            3 => DirTypeIndicator::CharDevice,
+            4 => DirTypeIndicator::BlockDevice,
+            5 => DirTypeIndicator::FIFO,
+            6 => DirTypeIndicator::Socket,
+            7 => DirTypeIndicator::SymLink,
+            _ => return None,
+        })
+    }
+
+    pub fn flush(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+
+        b.extend_from_slice(&self.inode.to_le_bytes());
+        b.extend_from_slice(&self.entry_size.to_le_bytes());
+        b.extend_from_slice(&self.name_length.to_le_bytes());
+        b.extend_from_slice(&self.file_type.to_le_bytes());
+        b.extend_from_slice(&self.name);
+
+        b
+    }
+}
+
+pub const TYPE_INDICATOR_UNKNWON: u8 = 0;
+pub const TYPE_INDICATOR_REG_FILE: u8 = 1;
+pub const TYPE_INDICATOR_DIR: u8 = 2;
+pub const TYPE_INDICATOR_CHAR_DEVICE: u8 = 3;
+pub const TYPE_INDICATOR_BLOCK_DEVICE: u8 = 4;
+pub const TYPE_INDICATOR_FIFO: u8 = 5;
+pub const TYPR_INDICATOR_SOCKET: u8 = 6;
+pub const TYPE_INDICATOR_SYM_LINK: u8 = 7;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirTypeIndicator {
+    Unknown = 0,
+    RegFile = 1,
+    Dir = 2,
+    CharDevice = 3,
+    BlockDevice = 4,
+    FIFO = 5,
+    Socket = 6,
+    SymLink = 7,
 }
 
 pub struct Ext2FS<T: Disk + Clone> {
@@ -455,11 +629,37 @@ where
 
         unsafe { (inode_data.as_ptr() as *const Inode).as_ref().cloned() }
     }
-    pub fn read_file(&mut self, inode_num: u32) -> Result<Vec<u8>, String> {
-        let inode = self.read_inode(inode_num).ok_or("Failed to read inode")?;
-        // if !inode.is_file() {
-        //     return Err("This is not a file".to_string());
-        // }
+
+    pub fn write_inode(&mut self, inode_number: u32, inode: Inode) -> Result<(), super::Error> {
+        let inode_size = self
+            .super_block_ext
+            .map(|e| e.size_inode as u32)
+            .unwrap_or(128);
+        let inodes_per_group = self.super_block.inode_group_count;
+        let group = (inode_number - 1) / inodes_per_group;
+        let index = (inode_number - 1) % inodes_per_group;
+        let inode_table_block = self
+            .bgd
+            .get(group as usize)
+            .ok_or(super::Error::FileNotFound)?
+            .inode_table_addr;
+        let offset = index * inode_size;
+
+        let block_size = self.super_block.block_size();
+        let block = inode_table_block + (offset / block_size);
+        let block_offset = offset % block_size;
+
+        let mut data = self.super_block.read_block(block, &mut self.disk);
+        let mut inode = inode.flush();
+        inode.resize(inode_size as usize, 0);
+        data[block_offset as usize..(block_offset + inode_size) as usize].copy_from_slice(&inode);
+
+        self.super_block
+            .write_block(block, &mut self.disk, &data)
+            .map_err(|x| super::Error::KernelError(x))
+    }
+
+    pub fn read_file(&mut self, inode: Inode) -> Result<Vec<u8>, super::Error> {
         let block_size = self.super_block.block_size();
         let filesize = inode.size_low; // in byte
         let mut remaining_size = filesize;
@@ -467,8 +667,6 @@ where
         let mut current_dbp = 0;
 
         while remaining_size != 0 {
-            info!("Reading file inode {}", remaining_size);
-
             let current_block = self.read_block(inode.dbp[current_dbp]);
             if remaining_size < block_size {
                 data.extend_from_slice(&current_block[..remaining_size as usize]);
@@ -482,9 +680,9 @@ where
         Ok(data)
     }
 
-    pub fn read_directory(&mut self, inode_num: u32) -> Result<Vec<DirectoryEntry>, String> {
-        let file = self.read_file(inode_num)?;
-        let inode = self.read_inode(inode_num).ok_or("Failed to get inode")?;
+    pub fn read_directory(&mut self, inode: u32) -> Result<Vec<DirectoryEntry>, super::Error> {
+        let inode_data = self.read_inode(inode).ok_or(super::Error::FileNotFound)?;
+        let file = self.read_file(inode_data)?;
 
         let mut entries = Vec::new();
         let mut offset = 0;
@@ -504,5 +702,482 @@ where
 
     pub fn read_block(&mut self, block_id: u32) -> Vec<u8> {
         self.super_block.read_block(block_id, &mut self.disk)
+    }
+
+    pub fn read_inode_by_name(
+        &mut self,
+        dir_inode: u32,
+        name: &str,
+    ) -> Result<u32, super::Error> {
+        let dirs = self.read_directory(dir_inode)?;
+        for dir in dirs {
+            if let Some(dname) = dir.name() {
+                if dname == name {
+                    return Ok(dir.inode);
+                }
+            }
+        }
+        Err(super::Error::FileNotFound)
+    }
+
+    pub fn read_path(&mut self, path: super::Path) -> Result<u32, super::Error> {
+        if path.is_relative() {
+            return Err(super::Error::CantUseRelPath);
+        }
+
+        let dirs = self.read_directory(2)?;
+        let comps = path.components();
+
+        let mut current_inode = 2;
+
+        for (i, comp) in comps.iter().enumerate() {
+            current_inode = self.read_inode_by_name(current_inode, comp)?;
+            let inode = self.read_inode(current_inode).ok_or(super::Error::FileNotFound)?;
+
+            if !inode.is_dir() && i != comps.len() - 1 {
+                return Err(super::Error::NotADirectory);
+            }
+        }
+
+        Ok(current_inode)
+    }
+
+    pub fn write_block(&mut self, block_id: u32, buf: &[u8]) {
+        self.super_block
+            .write_block(block_id, &mut self.disk, buf)
+            .unwrap()
+    }
+
+    pub fn allocate_block(&mut self) -> Option<u32> {
+        let block_grp = self.block_group_allocate()?;
+        let bitmap_block = self.bgd[block_grp as usize].block_bitmap_addr;
+        let block_size = self.super_block.block_size();
+        let mut bitmap = self.super_block.read_block(bitmap_block, &mut self.disk);
+    
+        for byte_index in 0..bitmap.len() {
+            let byte = bitmap[byte_index];
+    
+            for bit_index in 0..8 {
+                if (byte & (1 << bit_index)) == 0 {
+                    // Ce bloc est libre
+                    bitmap[byte_index] |= 1 << bit_index;
+    
+                    // Sauvegarde la bitmap modifiée
+                    self.write_block(bitmap_block, &bitmap);
+                    self.bgd[block_grp as usize].unallocated_block_count -= 1;
+    
+                    // Calcul de l’index du bloc alloué
+                    let block_index_within_group = (byte_index * 8 + bit_index) as u32;
+                    let blocks_per_group = self.super_block.block_group_count;
+    
+                    // Adresse réelle du bloc (relatif au groupe)
+                    let block_absolute = self.super_block.block_group_count * block_grp + block_index_within_group;
+    
+                    return Some(block_absolute);
+                }
+            }
+        }
+    
+        None
+    }
+    
+
+    pub fn block_group_allocate(&self) -> Option<u32> {
+        for i in 0..self.bgd.len() {
+            if self.bgd[i].unallocated_block_count > 0 {
+                return Some(i as u32);
+            }
+        }
+        None
+    }
+
+    pub fn allocate_inode(&mut self) -> Option<u32> {
+        let group = self.block_group_allocate()?;
+        let block_id = self.bgd[group as usize].inode_bitmap_addr;
+        let block_size = self.super_block.block_size();
+        let mut bitmap = self.super_block.read_block(block_id, &mut self.disk);
+        for byte_index in 0..bitmap.len() {
+            if byte_index == 0 { continue; } // skip inode 1-8 si tu veux les réserver
+        
+            let byte = bitmap[byte_index];
+            for bit_index in 0..8 {
+                if (byte & (1 << bit_index)) == 0 {
+                    // Marque le bit comme utilisé
+                    bitmap[byte_index] |= 1 << bit_index;
+        
+                    self.write_block(block_id, &bitmap);
+                    self.bgd[group as usize].unallocated_inode_count -= 1;
+        
+                    let inode_index = byte_index * 8 + bit_index;
+                    // inode 1 est en position 0
+                    return Some((inode_index+1) as u32);
+                }
+            }
+        }
+        
+        None
+    }
+
+    pub fn is_unallocated(&mut self, inode: u32) -> bool {
+        // Les inodes commencent à 1, donc on ajuste l'index
+        let inode_index = inode - 1;
+    
+        let inodes_per_group = self.super_block.inode_group_count;
+        let group = inode_index / inodes_per_group;
+        let index = inode_index % inodes_per_group;
+    
+        let block_id = self.bgd[group as usize].inode_bitmap_addr;
+    
+        let bitmap = self.super_block.read_block(block_id, &mut self.disk);
+    
+        let byte_index = (index / 8) as usize;
+        let bit_offset = index % 8;
+    
+        if byte_index >= bitmap.len() {
+            return true; // Considérer comme non alloué si out of bounds
+        }
+    
+        // Si le bit est à 0 → inode non alloué
+        (bitmap[byte_index] & (1 << bit_offset)) == 0
+    }
+    
+
+    pub fn insert_inode(
+        &mut self,
+        parent_inode_number: u32,
+        name: &str,
+        inode: Inode,
+    ) -> Result<(), super::Error> {
+        let mut parent_inode = self.read_inode(parent_inode_number).ok_or(super::Error::FileNotFound)?;
+        let mut dir = self.read_directory(parent_inode_number)?;
+        let inode_id = self.allocate_inode().ok_or(super::Error::NotEnoughSpace)?;
+        let mut new_entry = DirectoryEntry {
+            inode: inode_id,
+            entry_size: 0, // on mettra la vraie valeur après
+            name_length: name.len() as u8,
+            file_type: TYPE_INDICATOR_REG_FILE,
+            name: name.as_bytes().to_vec(),
+        };
+    
+        let block_size = self.super_block.block_size() as usize;
+    
+        // let mut data = Vec::new();
+        let mut blocks = Vec::new();
+        let mut current_block_entries: Vec<DirectoryEntry> = Vec::new();
+        let mut current_block_size = 0;
+    
+        for entry in dir {
+            let entry_data = entry.flush();
+            let padding_len = entry.entry_size as usize - entry_data.len();
+            let total_entry_len = entry_data.len() + padding_len;
+    
+            if current_block_size + total_entry_len > block_size {
+                // Bloc plein : on flush
+                let mut block = Vec::new();
+                for e in &current_block_entries {
+                    let data = e.flush();
+                    let padding = e.entry_size as usize - data.len();
+                    block.extend_from_slice(&data);
+                    block.extend(core::iter::repeat(0).take(padding));
+                }
+                blocks.push(block);
+                current_block_entries.clear();
+                current_block_size = 0;
+            }
+    
+            current_block_entries.push(entry);
+            current_block_size += total_entry_len;
+        }
+    
+        // On tente d’ajouter dans le dernier bloc
+        let mut last_block_filled = false;
+        if !current_block_entries.is_empty() {
+            let last = current_block_entries.last_mut().unwrap();
+            let last_entry_size = 8 + ((last.name_length as usize + 3) & !3);
+            let space = last.entry_size as usize - last_entry_size;
+            let new_entry_size = 8 + ((name.len() + 3) & !3);
+    
+            if space >= new_entry_size {
+                // On split la dernière entrée
+                last.entry_size = last_entry_size as u16;
+    
+                new_entry.entry_size = (block_size - current_block_size + space) as u16;
+                current_block_entries.push(new_entry.clone());
+                last_block_filled = true;
+            }
+        }
+    
+        if !last_block_filled {
+            // Nouveau bloc
+            new_entry.entry_size = block_size as u16;
+            blocks.push({
+                let mut block = new_entry.flush();
+                block.resize(block_size, 0);
+                block
+            });
+        } else {
+            // Flush du dernier bloc avec la nouvelle entrée
+            let mut block = Vec::new();
+            for e in &current_block_entries {
+                let data = e.flush();
+                let padding = e.entry_size as usize - data.len();
+                block.extend_from_slice(&data);
+                block.extend(core::iter::repeat(0).take(padding));
+            }
+            blocks.push(block);
+        }
+    
+        // Écriture des blocs
+        for (i, block) in blocks.iter().enumerate() {
+            let block_num = if i < parent_inode.dbp.len() && parent_inode.dbp[i] != 0 {
+                parent_inode.dbp[i]
+            } else {
+                let b = self.allocate_block().ok_or(super::Error::NotEnoughSpace)?;
+                parent_inode.dbp[i] = b;
+                b
+            };
+            self.write_block(block_num, block);
+        }
+    
+        self.write_inode(parent_inode_number, parent_inode)?;
+        self.write_inode(inode_id, inode)?;
+        self.flush();
+    
+        Ok(())
+    }
+
+    pub fn insert_inode2(
+        &mut self,
+        parent_inode_number: u32,
+        name: &str,
+        inode: Inode,
+    ) -> Result<(), super::Error> {
+        let mut parent_inode = self.read_inode(parent_inode_number).ok_or(super::Error::FileNotFound)?;
+        let inode_id = self.allocate_inode().ok_or(super::Error::NotEnoughSpace)?;
+        let mut new_entry = DirectoryEntry {
+            inode: inode_id,
+            entry_size: 0, 
+            name_length: name.len() as u8,
+            file_type: TYPE_INDICATOR_REG_FILE,
+            name: name.as_bytes().to_vec(),
+        };
+
+        let inode_data = self.read_inode(inode).ok_or(super::Error::FileNotFound)?;
+        let file = self.read_file(inode_data)?;
+
+        let mut entries = Vec::new();
+        let mut offset = 0;
+        while offset < file.len() {
+            let x = &mut file[offset..].iter();
+            let mut entry = DirectoryEntry::from_buffer(x).unwrap();
+            if entry.inode == 0 {
+                new_entry.entry_size = (entries
+                .last()
+                .map(|x| x.entry_size as usize)
+                .copied()
+                .unwrap_or(0) + core::mem::size_of::<DirectoryEntry>()) as u32;
+                entry = new_entry;
+                entries.push(entry);
+
+            }
+            entries.push(entry.clone());
+            offset += entry.entry_size as usize;
+        }
+
+
+        for entry in entries {
+
+        }
+
+
+    }
+    
+
+    pub fn write_file(
+        &mut self,
+        parent_inode_number: u32,
+        name: &str,
+        data: &[u8],
+    ) -> Result<(), super::Error> {
+        let mut inode = Inode::new();
+        inode.type_and_perm = INODE_TYPE_REG | 0o644;
+        inode.size_low = data.len() as u32;
+        inode.last_access_time = 1744108895;
+        inode.last_modif_time = 1744108895;
+        inode.creation_time = 1744108895;
+        let mut remaining_size = data.len() as u32;
+        let mut current_dbp = 0;
+        while remaining_size != 0 {
+            let current_block = self.allocate_block().ok_or(super::Error::NotEnoughSpace)?;
+            inode.dbp[current_dbp] = current_block;
+            let block_size = self.super_block.block_size();
+            if remaining_size < block_size as u32 {
+                self.write_block(current_block, &data[..remaining_size as usize]);
+                remaining_size = 0;
+                break;
+            } else {
+                self.write_block(current_block, &data[..block_size as usize]);
+                remaining_size -= block_size as u32;
+            }
+            current_dbp += 1;
+        }
+
+        inode.block_addr = current_dbp as u32;
+        if remaining_size != 0 {
+            let current_block = self.allocate_block().ok_or(super::Error::NotEnoughSpace)?;
+            inode.sibp = current_block;
+            let block_size = self.super_block.block_size();
+            if remaining_size < block_size as u32 {
+                self.write_block(current_block, &data[..remaining_size as usize]);
+                remaining_size = 0;
+            } else {
+                self.write_block(current_block, &data[..block_size as usize]);
+                remaining_size -= block_size as u32;
+            }
+
+            if remaining_size != 0 {
+                let current_block = self.allocate_block().ok_or(super::Error::NotEnoughSpace)?;
+                inode.dibp = current_block;
+                let block_size = self.super_block.block_size();
+                if remaining_size < block_size as u32 {
+                    self.write_block(current_block, &data[..remaining_size as usize]);
+                    remaining_size = 0;
+                } else {
+                    self.write_block(current_block, &data[..block_size as usize]);
+                    remaining_size -= block_size as u32;
+                }
+
+                if remaining_size != 0 {
+                    let current_block =
+                        self.allocate_block().ok_or(super::Error::NotEnoughSpace)?;
+                    inode.tibp = current_block;
+                    let block_size = self.super_block.block_size();
+                    if remaining_size < block_size as u32 {
+                        self.write_block(current_block, &data[..remaining_size as usize]);
+                        remaining_size = 0;
+                    } else {
+                        self.write_block(current_block, &data[..block_size as usize]);
+                        remaining_size -= block_size as u32;
+                    }
+
+                    if remaining_size != 0 {
+                        return Err(super::Error::NotEnoughSpace);
+                    }
+                }
+            }
+        }
+
+        self.insert_inode(parent_inode_number, name, inode)?;
+
+        Ok(())
+    }
+
+    pub fn write_directory(&mut self, parent_inode_number: u32, name: &str) -> Result<(), super::Error> {
+        let mut inode = Inode::new();
+        inode.type_and_perm = INODE_TYPE_DIR;
+        inode.size_low = 0;
+        inode.hard_link_count = 2; // . for "." and ".."
+
+        self.insert_inode(parent_inode_number, name, inode)?;
+
+        Ok(())
+    }
+
+    pub fn write_file_path(&mut self, path: super::Path, data: &[u8]) -> Result<(), super::Error> {
+        if path.is_relative() {
+            return Err(super::Error::CantUseRelPath);
+        }
+
+
+        let comps = path.components();
+
+        let mut current_inode = 2;
+
+        for (i, comp) in comps.iter().enumerate() {
+            if i == comps.len() - 1 {
+                break;
+            }
+            current_inode = self.read_inode_by_name(current_inode, comp)?;
+            let inode = self.read_inode(current_inode).ok_or(super::Error::FileNotFound)?;
+            if !inode.is_dir() && i != comps.len() - 1 {
+                return Err(super::Error::NotADirectory);
+            }
+        }
+        let inode = self.read_inode(current_inode).ok_or(super::Error::FileNotFound)?;
+
+        if !inode.is_dir() {
+            return Err(super::Error::NotADirectory);
+        }
+
+        self.write_file(current_inode, comps.last().unwrap(), data)?;
+
+        self.flush();
+
+        Ok(())
+    }
+
+    pub fn write_directory_path(&mut self, path: super::Path) -> Result<(), super::Error> {
+        if path.is_relative() {
+            return Err(super::Error::CantUseRelPath);
+        }
+
+        let comps = path.components();
+
+        let mut current_inode = 2;
+
+        for (i, comp) in comps.iter().enumerate() {
+            current_inode = self.read_inode_by_name(current_inode, comp)?;
+            let inode = self.read_inode(current_inode).ok_or(super::Error::FileNotFound)?;
+            if !inode.is_dir() && i != comps.len() - 1 {
+                return Err(super::Error::NotADirectory);
+            }
+        }
+
+        let inode = self.read_inode(current_inode).ok_or(super::Error::FileNotFound)?;
+
+        if !inode.is_dir() {
+            return Err(super::Error::NotADirectory);
+        }
+
+        self.write_directory(current_inode, comps.last().unwrap())?;
+
+        Ok(())
+    }
+
+    pub fn flush(&mut self) {
+        for bgd in &self.bgd {
+            bgd.flush(self.super_block, &mut self.disk);
+            // flush inode table
+        }
+    }
+}
+
+impl<T: Disk + Clone> super::FileSystem for Ext2FS<T> {
+    fn read(&mut self, path: super::Path) -> Result<Vec<u8>, super::Error> {
+        let inode_id = self.read_path(path)?;
+        let inode = self.read_inode(inode_id).ok_or(super::Error::FileNotFound)?;
+        let file = self.read_file(inode)?;
+
+        Ok(file)
+    }
+
+    fn write(&mut self, path: super::Path, data: &[u8]) -> Result<(), super::Error> {
+        self.write_file_path(path, data)
+    }
+
+    fn delete(&mut self, path: super::Path) -> Result<(), super::Error> {
+        todo!()
+    }
+
+    fn rename(&mut self, old_path: super::Path, new_path: super::Path) -> Result<(), super::Error> {
+        todo!()
+    }
+
+    fn create_directory(&mut self, path: super::Path) -> Result<(), super::Error> {
+        self.write_directory_path(path)
+    }
+
+    fn create_file(&mut self, path: super::Path) -> Result<(), super::Error> {
+        todo!()
     }
 }

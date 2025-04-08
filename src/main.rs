@@ -22,7 +22,6 @@ mod gdt;
 mod graphic;
 mod idt;
 mod io;
-mod libc;
 mod log;
 mod math;
 mod syscall;
@@ -55,7 +54,7 @@ use graphic::{
     text::TextEdit,
     windows::Window,
 };
-use io::port::STDIO;
+use io::port::{Fd, STDIO};
 use log::set_log_output;
 use spin::Mutex;
 
@@ -107,11 +106,10 @@ pub fn test_keyboard_polling() {
 }
 
 fn keyboard_handler(key_event: KeyEvent, context: &Mutex<Context>) {
-    info!("Keyboard event: {:?}", key_event);
-    if !context.lock().is_app_initialized() {
-        return;
-    }
-    APP_MANAGER.lock().handle_keyboard_event(key_event);
+    println_serial!("Key Handler");
+    let mut fd = Fd(STDIO.fd());
+
+    write!(fd, "HELLO");
 }
 
 pub fn check_pic_mask() {
@@ -181,7 +179,7 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
 
     let mut win_log = WINDOW_MANAGER.lock().new_window(600, 800, 0, 0);
-    let mut text_buffer = TextBuffer::create(1200 - 600, 800, 500, 0);
+    let mut text_buffer = TextBuffer::create(1200 - 600, 800, 600, 0);
     set_log_output(LogOutput::TextBuffer(win_log));
 
     let mut stdio = io::port::Ports::new_port(
@@ -195,16 +193,15 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut disk = drivers::disk::ata::AtaPio::detect_disks();
     let mut last = disk.last().unwrap().clone();
     let mut ext2 = fs::ext2::Ext2FS::from_disk(&mut last).unwrap();
-    info!(
-        "reading file coucou.txt: {:#?}",
-        ext2.super_block_ext.unwrap().optional_feature
-    );
-    let inode = ext2.read_file(15).unwrap();
-    write!(stdio, "{:#?}", core::str::from_utf8(&inode));
+    use fs::FileSystem;
+    let inode: Result<(), fs::Error> = ext2.write_file(2, "popo.txt", "hello world".as_bytes());
+    info!("{}", ext2.is_unallocated(12));
+    let popo = ext2.read_path(fs::Path::new("/popo.txt")).unwrap();
+    let mut file = ext2.read_inode(popo).unwrap();
+    let mut file = ext2.read_file(file).unwrap();
+    // writeln!(stdio, "{:#?}", inode);
+    writeln!(stdio, "{:#?}", core::str::from_utf8(file.as_slice()));
     let mut context = GLOBAL_CONTEXT.lock();
-    WINDOW_MANAGER
-        .lock()
-        .sync(context.framebuffer.as_mut().unwrap());
 
     loop {}
 }

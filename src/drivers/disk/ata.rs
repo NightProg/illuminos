@@ -225,7 +225,13 @@ impl super::Disk for AtaPio {
     }
 
     fn write_sector(&mut self, sector: u64, data: &[u8]) {
-        self.write_sector8(sector as u32, data.try_into().unwrap());
+        let mut v = Vec::new();
+        for i in 0..data.len() {
+            v.push(data[i]);
+        }
+
+        v.resize(512, 0);
+        self.write_sector8(sector as u32, &v.try_into().unwrap());
 
         self.flush_cache();
     }
