@@ -1,7 +1,15 @@
 use core::fmt::Display;
 
-use crate::{drivers::vga, print, println};
+use crate::{graphic::{BLUE, RED, YELLOW}, print, println};
+use crate::graphic::text::TextBuffer;
+use crate::graphic::windows::WINDOW_MANAGER;
+use crate::io::serial::SerialPortWriter;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogOutput {
+    Serial,
+    TextBuffer(usize),
+}
 
 pub enum LogLevel {
     Info,
@@ -33,10 +41,19 @@ macro_rules! log {
     };
 }
 
-pub static LOGGER: spin::Mutex<Logger> = spin::Mutex::new(Logger::new(LogLevel::Info));
+pub static LOGGER: spin::Mutex<Logger> = spin::Mutex::new(Logger::new(LogLevel::Info, LogOutput::Serial));
 
 pub fn set_log_level(level: LogLevel) {
     LOGGER.lock().level = level;
+}
+
+pub fn set_log_output(output: LogOutput) {
+    LOGGER.lock().output = output;
+    if let LogOutput::TextBuffer(winid) = output {
+        let mut text_buffer = TextBuffer::new(winid);
+        text_buffer.init();
+        LOGGER.lock().text_buffer = Some(text_buffer);
+    }
 }
 
 
@@ -65,32 +82,35 @@ macro_rules! error {
 
 pub struct Logger {
     level: LogLevel,
+    output: LogOutput,
+    text_buffer: Option<TextBuffer>,
 }
 
 impl Logger {
-    pub const fn new(level: LogLevel) -> Self {
+    pub const fn new(level: LogLevel, output: LogOutput) -> Self {
         Logger {
             level,
+            output,
+            text_buffer: None,
         }
     }
 }
 
 impl core::fmt::Write for Logger {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let old = vga::get_color();
-        match self.level {
-            LogLevel::Info => {
-                vga::set_color(vga::Color::LightBlue, vga::Color::Black);
-            }
-            LogLevel::Warning => {
-                vga::set_color(vga::Color::Yellow, vga::Color::Black);
-            }
-            LogLevel::Error => {
-                vga::set_color(vga::Color::Red, vga::Color::Black);
-            }
+        if self.output == LogOutput::Serial {
+            print!("{}", s);
+        } else if let LogOutput::TextBuffer(winid) = self.output {
+            let text_buffer = self.text_buffer.as_mut().unwrap();
+            text_buffer.set_color(match self.level {
+                LogLevel::Info => BLUE,
+                LogLevel::Warning => YELLOW,
+                LogLevel::Error => RED,
+            });
+
+            text_buffer.write_string(s);
+            
         }
-        print!("{}", s);
-        vga::set_color(old.foreground(), old.background());
         Ok(())
     }
 }
