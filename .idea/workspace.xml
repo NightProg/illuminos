@@ -8,16 +8,14 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="103bfe35-118c-4e47-954c-c80d87fc5559" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/illuminos-uefi.img" beforeDir="false" afterPath="$PROJECT_DIR$/illuminos-uefi.img" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/run-uefi.sh" beforeDir="false" afterPath="$PROJECT_DIR$/run-uefi.sh" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/fs/fat32.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/fs/fat32.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/graphic/app.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/graphic/app.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/graphic/console.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/graphic/console.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/graphic/text.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/graphic/text.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/graphic/widget.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/graphic/widget.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/io/pci.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/io/pci.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/io/serial.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/io/serial.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.lock" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/allocator/paging.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/allocator/paging.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/elf/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/elf/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/fs.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/fs.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/fs/ext2.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/fs/ext2.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/idt.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/idt.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/io/port.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/io/port.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -154,6 +152,7 @@
       <workItem from="1743682641038" duration="1288000" />
       <workItem from="1743702168310" duration="9296000" />
       <workItem from="1743782402922" duration="2974000" />
+      <workItem from="1744447311263" duration="3000" />
     </task>
     <servers />
   </component>

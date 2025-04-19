@@ -1,3 +1,4 @@
+
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -627,7 +628,9 @@ where
         let data = self.super_block.read_block(block, &mut self.disk);
         let inode_data = &data[block_offset as usize..(block_offset + inode_size) as usize];
 
-        unsafe { (inode_data.as_ptr() as *const Inode).as_ref().cloned() }
+        let inode = unsafe { (inode_data.as_ptr() as *const Inode).as_ref().cloned() };
+
+        inode
     }
 
     pub fn write_inode(&mut self, inode_number: u32, inode: Inode) -> Result<(), super::Error> {
@@ -674,8 +677,10 @@ where
             } else {
                 data.extend(current_block);
                 remaining_size -= block_size;
+                current_dbp += 1;
             }
         }
+
 
         Ok(data)
     }
@@ -753,34 +758,34 @@ where
         let bitmap_block = self.bgd[block_grp as usize].block_bitmap_addr;
         let block_size = self.super_block.block_size();
         let mut bitmap = self.super_block.read_block(bitmap_block, &mut self.disk);
-    
+
         for byte_index in 0..bitmap.len() {
             let byte = bitmap[byte_index];
-    
+
             for bit_index in 0..8 {
                 if (byte & (1 << bit_index)) == 0 {
                     // Ce bloc est libre
                     bitmap[byte_index] |= 1 << bit_index;
-    
+
                     // Sauvegarde la bitmap modifiée
                     self.write_block(bitmap_block, &bitmap);
                     self.bgd[block_grp as usize].unallocated_block_count -= 1;
-    
+
                     // Calcul de l’index du bloc alloué
                     let block_index_within_group = (byte_index * 8 + bit_index) as u32;
                     let blocks_per_group = self.super_block.block_group_count;
-    
+
                     // Adresse réelle du bloc (relatif au groupe)
                     let block_absolute = self.super_block.block_group_count * block_grp + block_index_within_group;
-    
+
                     return Some(block_absolute);
                 }
             }
         }
-    
+
         None
     }
-    
+
 
     pub fn block_group_allocate(&self) -> Option<u32> {
         for i in 0..self.bgd.len() {
@@ -798,49 +803,46 @@ where
         let mut bitmap = self.super_block.read_block(block_id, &mut self.disk);
         for byte_index in 0..bitmap.len() {
             if byte_index == 0 { continue; } // skip inode 1-8 si tu veux les réserver
-        
+
             let byte = bitmap[byte_index];
             for bit_index in 0..8 {
                 if (byte & (1 << bit_index)) == 0 {
-                    // Marque le bit comme utilisé
                     bitmap[byte_index] |= 1 << bit_index;
-        
+
                     self.write_block(block_id, &bitmap);
                     self.bgd[group as usize].unallocated_inode_count -= 1;
-        
+
                     let inode_index = byte_index * 8 + bit_index;
-                    // inode 1 est en position 0
                     return Some((inode_index+1) as u32);
                 }
             }
         }
-        
+
         None
     }
 
     pub fn is_unallocated(&mut self, inode: u32) -> bool {
         // Les inodes commencent à 1, donc on ajuste l'index
         let inode_index = inode - 1;
-    
+
         let inodes_per_group = self.super_block.inode_group_count;
         let group = inode_index / inodes_per_group;
         let index = inode_index % inodes_per_group;
-    
+
         let block_id = self.bgd[group as usize].inode_bitmap_addr;
-    
+
         let bitmap = self.super_block.read_block(block_id, &mut self.disk);
-    
+
         let byte_index = (index / 8) as usize;
         let bit_offset = index % 8;
-    
+
         if byte_index >= bitmap.len() {
-            return true; // Considérer comme non alloué si out of bounds
+            return true;
         }
-    
-        // Si le bit est à 0 → inode non alloué
+
         (bitmap[byte_index] & (1 << bit_offset)) == 0
     }
-    
+
 
     pub fn insert_inode(
         &mut self,
@@ -858,19 +860,19 @@ where
             file_type: TYPE_INDICATOR_REG_FILE,
             name: name.as_bytes().to_vec(),
         };
-    
+
         let block_size = self.super_block.block_size() as usize;
-    
+
         // let mut data = Vec::new();
         let mut blocks = Vec::new();
         let mut current_block_entries: Vec<DirectoryEntry> = Vec::new();
         let mut current_block_size = 0;
-    
+
         for entry in dir {
             let entry_data = entry.flush();
             let padding_len = entry.entry_size as usize - entry_data.len();
             let total_entry_len = entry_data.len() + padding_len;
-    
+
             if current_block_size + total_entry_len > block_size {
                 // Bloc plein : on flush
                 let mut block = Vec::new();
@@ -884,11 +886,11 @@ where
                 current_block_entries.clear();
                 current_block_size = 0;
             }
-    
+
             current_block_entries.push(entry);
             current_block_size += total_entry_len;
         }
-    
+
         // On tente d’ajouter dans le dernier bloc
         let mut last_block_filled = false;
         if !current_block_entries.is_empty() {
@@ -896,17 +898,17 @@ where
             let last_entry_size = 8 + ((last.name_length as usize + 3) & !3);
             let space = last.entry_size as usize - last_entry_size;
             let new_entry_size = 8 + ((name.len() + 3) & !3);
-    
+
             if space >= new_entry_size {
                 // On split la dernière entrée
                 last.entry_size = last_entry_size as u16;
-    
+
                 new_entry.entry_size = (block_size - current_block_size + space) as u16;
                 current_block_entries.push(new_entry.clone());
                 last_block_filled = true;
             }
         }
-    
+
         if !last_block_filled {
             // Nouveau bloc
             new_entry.entry_size = block_size as u16;
@@ -926,7 +928,7 @@ where
             }
             blocks.push(block);
         }
-    
+
         // Écriture des blocs
         for (i, block) in blocks.iter().enumerate() {
             let block_num = if i < parent_inode.dbp.len() && parent_inode.dbp[i] != 0 {
@@ -938,11 +940,11 @@ where
             };
             self.write_block(block_num, block);
         }
-    
+
         self.write_inode(parent_inode_number, parent_inode)?;
         self.write_inode(inode_id, inode)?;
         self.flush();
-    
+
         Ok(())
     }
 
@@ -956,14 +958,13 @@ where
         let inode_id = self.allocate_inode().ok_or(super::Error::NotEnoughSpace)?;
         let mut new_entry = DirectoryEntry {
             inode: inode_id,
-            entry_size: 0, 
+            entry_size: 0,
             name_length: name.len() as u8,
             file_type: TYPE_INDICATOR_REG_FILE,
             name: name.as_bytes().to_vec(),
         };
 
-        let inode_data = self.read_inode(inode).ok_or(super::Error::FileNotFound)?;
-        let file = self.read_file(inode_data)?;
+        let mut file = self.read_block(parent_inode.dbp[0]);
 
         let mut entries = Vec::new();
         let mut offset = 0;
@@ -973,25 +974,103 @@ where
             if entry.inode == 0 {
                 new_entry.entry_size = (entries
                 .last()
-                .map(|x| x.entry_size as usize)
-                .copied()
-                .unwrap_or(0) + core::mem::size_of::<DirectoryEntry>()) as u32;
-                entry = new_entry;
-                entries.push(entry);
+                .cloned()
+                .map(|x: DirectoryEntry| x.entry_size as usize)
+                .unwrap_or(0) + core::mem::size_of::<DirectoryEntry>()) as u16;
+                entry = new_entry.clone();
+                entries.push(entry.clone());
 
             }
             entries.push(entry.clone());
             offset += entry.entry_size as usize;
         }
 
+        let block_size = self.super_block.block_size() as usize;
+        let mut blocks = Vec::new();
+        let mut current_block_entries: Vec<DirectoryEntry> = Vec::new();
+        let mut current_block_size = 0;
 
         for entry in entries {
+            let entry_data = entry.flush();
+            let padding_len = entry.entry_size as usize - entry_data.len();
+            let total_entry_len = entry_data.len() + padding_len;
 
+            if current_block_size + total_entry_len > block_size {
+                // Bloc plein : on flush
+                let mut block = Vec::new();
+                for e in &current_block_entries {
+                    let data = e.flush();
+                    let padding = e.entry_size as usize - data.len();
+                    block.extend_from_slice(&data);
+                    block.extend(core::iter::repeat(0).take(padding));
+                }
+                blocks.push(block);
+                current_block_entries.clear();
+                current_block_size = 0;
+            }
+
+            current_block_entries.push(entry);
+            current_block_size += total_entry_len;
         }
 
+        // On tente d’ajouter dans le dernier bloc
+        let mut last_block_filled = false;
+        if !current_block_entries.is_empty() {
+            let last = current_block_entries.last_mut().unwrap();
+            let last_entry_size = 8 + ((last.name_length as usize + 3) & !3);
+            let space = last.entry_size as usize - last_entry_size;
+            let new_entry_size = 8 + ((name.len() + 3) & !3);
+
+            if space >= new_entry_size {
+                // On split la dernière entrée
+                last.entry_size = last_entry_size as u16;
+
+                new_entry.entry_size = (block_size - current_block_size + space) as u16;
+                current_block_entries.push(new_entry.clone());
+                last_block_filled = true;
+            }
+        }
+
+        if !last_block_filled {
+            // Nouveau bloc
+            new_entry.entry_size = block_size as u16;
+            blocks.push({
+                let mut block = new_entry.flush();
+                block.resize(block_size, 0);
+                block
+            });
+        } else {
+            // Flush du dernier bloc avec la nouvelle entrée
+            let mut block = Vec::new();
+            for e in &current_block_entries {
+                let data = e.flush();
+                let padding = e.entry_size as usize - data.len();
+                block.extend_from_slice(&data);
+                block.extend(core::iter::repeat(0).take(padding));
+            }
+            blocks.push(block);
+        }
+
+        // Écriture des blocs
+        for (i, block) in blocks.iter().enumerate() {
+            let block_num = if i < parent_inode.dbp.len() && parent_inode.dbp[i] != 0 {
+                parent_inode.dbp[i]
+            } else {
+                let b = self.allocate_block().ok_or(super::Error::NotEnoughSpace)?;
+                parent_inode.dbp[i] = b;
+                b
+            };
+            self.write_block(block_num, block);
+        }
+
+        self.write_inode(parent_inode_number, parent_inode)?;
+        self.write_inode(inode_id, inode)?;
+        self.flush();
+
+        Ok(())
 
     }
-    
+
 
     pub fn write_file(
         &mut self,
@@ -1067,7 +1146,7 @@ where
             }
         }
 
-        self.insert_inode(parent_inode_number, name, inode)?;
+        self.insert_inode2(parent_inode_number, name, inode)?;
 
         Ok(())
     }
@@ -1152,7 +1231,7 @@ where
     }
 }
 
-impl<T: Disk + Clone> super::FileSystem for Ext2FS<T> {
+impl<T: Disk + Clone + 'static> super::FileSystem for Ext2FS<T> {
     fn read(&mut self, path: super::Path) -> Result<Vec<u8>, super::Error> {
         let inode_id = self.read_path(path)?;
         let inode = self.read_inode(inode_id).ok_or(super::Error::FileNotFound)?;

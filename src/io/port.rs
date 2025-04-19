@@ -6,6 +6,7 @@ use core::sync::atomic::Ordering;
 use core::{fmt::Write, sync::atomic::AtomicUsize};
 use lazy_static::lazy_static;
 use spin::Mutex;
+use crate::warn;
 
 pub static FD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -15,7 +16,7 @@ pub static STDIO: AtomicFd = AtomicFd::new();
 
 pub fn new_port<R, W>(read: R, write: W) -> Fd
 where
-    R: Fn() -> Vec<u8> + 'static,
+    R: FnMut() -> Vec<u8> + 'static,
     W: FnMut(&[u8]) + 'static,
 {
     let fd = FD_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -34,7 +35,7 @@ impl Ports {
 
     pub fn new_port<R, W>(read: R, write: W) -> Fd
     where
-        R: Fn() -> Vec<u8> + 'static,
+        R: FnMut() -> Vec<u8> + 'static,
         W: FnMut(&[u8]) + 'static,
     {
         let fd = FD_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -64,7 +65,7 @@ impl Ports {
 
 #[derive(Clone)]
 pub struct Port {
-    read: Rc<RefCell<dyn Fn() -> Vec<u8>>>,
+    read: Rc<RefCell<dyn FnMut() -> Vec<u8>>>,
     write: Rc<RefCell<dyn FnMut(&[u8])>>,
     fd: usize,
 }
@@ -84,7 +85,7 @@ impl Port {
     }
     fn new<R, W>(read: R, write: W, fd: usize) -> Self
     where
-        R: Fn() -> Vec<u8> + 'static,
+        R: FnMut() -> Vec<u8> + 'static,
         W: FnMut(&[u8]) + 'static,
     {
         Port {
@@ -101,6 +102,10 @@ impl Port {
     pub fn write(&mut self, buf: &[u8]) {
         (self.write.borrow_mut())(buf);
     }
+
+    pub fn read(&mut self) -> Vec<u8> {
+        (self.read.borrow_mut())()
+    }
 }
 
 impl Write for Port {
@@ -110,6 +115,8 @@ impl Write for Port {
     }
 }
 
+
+#[derive(Debug)]
 pub struct Fd(pub usize);
 
 impl Fd {
@@ -122,10 +129,21 @@ impl Fd {
         self.0
     }
 
-    pub fn write(&mut self, buf: &[u8]) {
+    pub fn write(&self, buf: &[u8]) {
         let port = Port::from_fd(self.0);
         if let Some(mut port) = port {
             port.write(buf);
+        } else {
+            warn!("no port found");
+        }
+    }
+
+    pub fn read(&self) -> Option<Vec<u8>> {
+        let port = Port::from_fd(self.0);
+        if let Some(mut port) = port {
+            Some(port.read())
+        } else {
+            None
         }
     }
 }

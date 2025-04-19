@@ -14,12 +14,11 @@ use super::paging::{map_page, PagingManager};
 
 
 
-pub const HEAP_START: VirtAddr = VirtAddr::new(0x4444_4444_0000);
+pub const HEAP_START: VirtAddr = VirtAddr::new(0xFFFF800000000000);
 pub const HEAP_SIZE: u64 = 1024 * 1024 * 10; // 100 Mo
 
 pub fn init_heap(paging_manager: &mut PagingManager, flags: PageTableFlags) {
     reserve_memory(HEAP_START, HEAP_SIZE, &mut paging_manager.mapper, &mut paging_manager.frame_allocator, flags);
-
     unsafe {
         ALLOCATOR.lock().init(HEAP_START.as_u64() as usize, HEAP_SIZE as usize);
     }
@@ -130,10 +129,10 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 //         let mut current = *head;
 
 //         let align = layout.align();
-        
+
 
 //         let aligned_size = layout.size().max(MIN_BLOCK_SIZE);
-        
+
 //         while !current.is_null() {
 //             if (*current).size >= aligned_size {
 //                 if !prev.is_null() {

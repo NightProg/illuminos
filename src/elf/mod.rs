@@ -1,209 +1,140 @@
+use goblin::elf::Elf;
+use crate::allocator::paging::PagingManager;
+use x86_64::{VirtAddr, structures::paging::{PageSize, Size4KiB, PageTableFlags, Page, page_table::PageTableEntry}};
+use core::alloc::Layout;
 use alloc::vec::Vec;
+use crate::libc::OsHandle;
+use crate::info;
+use crate::println_serial;
+use alloc::boxed::Box;
+use crate::thread::Process;
 
-pub type ElfAddr = u64;
-pub type ElfOff = u64;
-pub type ElfWord = u32;
-pub type ElfHalf = u16;
-pub type ElfXWord = u64;
-pub type ElfSWord = i32;
-pub type ElfSXWord = i64;
-
-#[derive(Debug, Clone, Copy)]
-pub enum ElfFileKind {
-    Executable,
-    SharedObject,
-    Relocatable,
+#[derive(Debug)]
+pub enum ProgLoaderError {
+    GoblinError(goblin::error::Error),
+    IsNotExe
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ElfClassKind {
-    Class32,
-    Class64,
+#[derive(Debug)]
+pub struct ProgLoader<'a> {
+    elf: Elf<'a>,
+    buffer: &'a [u8]
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ElfOsAbi {
-    SysV,
-    HpuX,
-    Standalone,
-}
 
-#[derive(Debug, Clone, Copy)]
-pub enum ElfEndianness {
-    LittleEndian,
-    BigEndian,
-}
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct ElfHeader64 {
-    pub magic: [u8; 4],
-    pub class: u8,
-    pub data: u8,
-    pub version: u8,
-    pub os_abi: u8,
-    pub abi_version: u8,
-    pub pad: [u8; 7],
-    pub e_type: ElfHalf,
-    pub e_machine: ElfHalf,
-    pub e_version: ElfWord,
-    pub e_entry: ElfAddr,
-    pub e_phoff: ElfOff,
-    pub e_shoff: ElfOff,
-    pub e_flags: ElfWord,
-    pub e_ehsize: ElfHalf,
-    pub e_phentsize: ElfHalf,
-    pub e_phnum: ElfHalf,
-    pub e_shentsize: ElfHalf,
-    pub e_shnum: ElfHalf,
-    pub e_shstrndx: ElfHalf,
-}
+impl<'a> ProgLoader<'a> {
+    pub fn from_bytes(buffer: &'a [u8]) -> Result<Self, ProgLoaderError> {
+        let elf = Elf::parse(buffer.as_ref()).map_err(ProgLoaderError::GoblinError)?;
 
-pub const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
-pub const ELF_CLASS_32: u8 = 1;
-pub const ELF_CLASS_64: u8 = 2;
-
-pub const ELF_DATA_LSB: u8 = 1;
-pub const ELF_DATA_MSB: u8 = 2;
-pub const ELF_VERSION_CURRENT: u32 = 1;
-
-impl ElfHeader64 {
-    pub fn parse<'c>(buffer: impl AsRef<[u8]>) -> Option<ElfHeader64> {
-        let x = buffer.as_ref();
-        let elf_length = size_of::<ElfHeader64>();
-        if x.len() < elf_length {
-            return None;
-        }
-        let header = unsafe { &*(x.as_ptr() as *const ElfHeader64) };
-
-        if header.magic != ELF_MAGIC {
-            return None;
-        }
-        Some(*header)
-    }
-    pub fn new() -> Self {
-        ElfHeader64 {
-            magic: ELF_MAGIC,
-            class: ELF_CLASS_64,
-            data: ELF_DATA_LSB,
-            version: ELF_VERSION_CURRENT as u8,
-            os_abi: 0,
-            abi_version: 0,
-            pad: [0; 7],
-            e_type: 0,
-            e_machine: 0,
-            e_version: ELF_VERSION_CURRENT,
-            e_entry: 0,
-            e_phoff: 0,
-            e_shoff: 0,
-            e_flags: 0,
-            e_ehsize: 0,
-            e_phentsize: 0,
-            e_phnum: 0,
-            e_shentsize: 0,
-            e_shnum: 0,
-            e_shstrndx: 0,
-        }
-    }
-    pub fn get_class(&self) -> ElfClassKind {
-        match self.class {
-            ELF_CLASS_64 => ElfClassKind::Class64,
-            ELF_CLASS_32 => ElfClassKind::Class32,
-            _ => panic!("Unknown ELF class: {}", self.class),
-        }
+        Ok(Self {
+            elf,
+            buffer
+        })
     }
 
-    pub fn get_kind(&self) -> ElfFileKind {
-        match self.e_type {
-            0x02 => ElfFileKind::Executable,
-            0x03 => ElfFileKind::SharedObject,
-            0x04 => ElfFileKind::Relocatable,
-            _ => panic!("Unknown ELF type: {}", self.e_type),
+    pub fn map_memory(&mut self, paging_manager: &mut PagingManager) -> Option<()> {
+        for pheader in self.elf.program_headers.iter() {
+            if pheader.p_type == goblin::elf64::program_header::PT_LOAD {
+                let align = Size4KiB::SIZE;
+                let page_count = ((pheader.p_memsz + align  - 1) & !(align - 1)) / align;
+                let mut pages: Vec<Page> = Vec::new();
+
+                for i in 0..page_count {
+                    let frame = paging_manager.allocate_frame()?;
+                    let frame_addr = frame.start_address();
+
+                    let virt_addr = VirtAddr::new(pheader.p_vaddr + i * align);
+
+                    let flags = {
+                        let mut flags = PageTableFlags::WRITABLE | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+
+
+                        if pheader.is_executable() {
+
+                        }
+
+                        flags
+                    };
+
+                    paging_manager.map_memory(
+                        virt_addr, pheader.p_memsz as usize, frame_addr, flags
+                    );
+                    pages.push(Page::containing_address(virt_addr));
+                }
+
+
+                let poffset = pheader.p_offset as usize;
+                let pfilesz = pheader.p_filesz as usize;
+                let data = &self.buffer[poffset..poffset + pfilesz];
+                let raw_ptr = unsafe {
+                    pheader.p_vaddr as *mut u8
+                };
+
+
+                unsafe {
+                    raw_ptr.copy_from(data.as_ptr(), data.len());
+                }
+            }
         }
+
+        return Some(());
     }
 
-    pub fn get_endianness(&self) -> ElfEndianness {
-        match self.data {
-            ELF_DATA_LSB => ElfEndianness::LittleEndian,
-            ELF_DATA_MSB => ElfEndianness::BigEndian,
-            _ => panic!("Unknown ELF endianness: {}", self.data),
+    pub fn execute(&mut self, paging_manager: &mut PagingManager) -> Result<(), ProgLoaderError> {
+        if self.elf.header.e_type != goblin::elf64::header::ET_EXEC {
+            return Err(ProgLoaderError::IsNotExe)
         }
-    }
 
-    pub fn get_os_abi(&self) -> ElfOsAbi {
-        match self.os_abi {
-            0x0 => ElfOsAbi::SysV,
-            0x1 => ElfOsAbi::HpuX,
-            255 => ElfOsAbi::Standalone,
-            e => panic!("Unknown ELF OS ABI: {}", e),
-        }
-    }
+        self.map_memory(paging_manager);
 
-    pub fn get_elf_program_header(&self, buffer: impl AsRef<[u8]>) -> ElfProgramHeader64 {
-        let x = buffer.as_ref();
-        let phsize = self.e_phentsize as usize;
-        let buf = &x[self.e_phoff as usize..self.e_phoff as usize + phsize];
+        println_serial!("{:?}", paging_manager.mapper.phys_offset());
 
-        let program_header = unsafe {
-            (buf.as_ptr() as *const ElfProgramHeader64)
-                .as_ref()
-                .expect("Failed tp cast")
+        let mut res = Process::create_user_page_table(paging_manager).unwrap();
+        let mut process =  Process::spawn_user(
+            res,
+            1024 * 1024,
+            1024 * 1024 * 10,
+            VirtAddr::new(self.elf.header.e_entry),
+            paging_manager
+        ).unwrap();
+
+        unsafe {
+            process.execute();
         };
 
-        *program_header
+/*
+
+        let memory = unsafe {
+            alloc::alloc::alloc(Layout::from_size_align(4096 * 10, 8).unwrap())
+        };
+
+        let addr = memory.addr();
+        type EntryFn = extern "C" fn(OsHandle) -> !;
+
+
+        use core::arch::asm;
+
+        let entry: EntryFn = unsafe {
+            core::mem::transmute(self.elf.header.e_entry)
+        };
+        let mut os_handle = OsHandle::new();
+
+        let old_stack: u64;
+
+        unsafe {
+            asm!("mov {}, rsp", out(reg) old_stack, options(nostack, nomem));
+            asm!("mov rsp, {}", in(reg) addr, options(nostack, nomem));
+        };
+
+        entry(os_handle);
+
+        unsafe {
+            asm!("mov rsp, {}", in(reg) old_stack, options(nostack, nomem));
+         }
+        */
+        info!("FINISH");
+
+        Ok(())
     }
-
-    pub fn get_elf_segment_table(&self, buffer: impl AsRef<[u8]>) -> Vec<&ElfSectionEntry> {
-        let mut segment_table = Vec::new();
-        let mut off = self.e_shoff as usize;
-        let size = self.e_shentsize as usize;
-        let buffer = buffer.as_ref();
-        for i in 0..self.e_shnum {
-            let entry: &[u8] = &buffer[off..off + size];
-            off += size;
-            let entry = unsafe {
-                (entry.as_ptr() as *const ElfSectionEntry)
-                    .as_ref()
-                    .expect("Failed to cast")
-            };
-            segment_table.push(entry);
-        }
-
-        segment_table
-    }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct ElfProgramHeader64 {
-    pub p_type: u32,
-    pub p_offset: u64,
-    pub p_vaddr: u64,
-    pub p_paddr: u64,
-    pub p_filesz: u64,
-    pub p_memsz: u64,
-    pub p_flags: u32,
-    pub p_align: u64,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct ElfSectionEntry {
-    pub sh_index: ElfHalf,
-    pub sh_entry: ELfSection,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct ELfSection {
-    pub sh_name: ElfWord,
-    pub sh_type: ElfWord,
-    pub sh_flags: ElfXWord,
-    pub sh_addr: ElfAddr,
-    pub sh_offset: ElfOff,
-    pub sh_size: ElfXWord,
-    pub sh_link: ElfWord,
-    pub sh_info: ElfWord,
-    pub sh_addralign: ElfXWord,
-    pub sh_entsize: ElfXWord,
 }

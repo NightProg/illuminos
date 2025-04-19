@@ -1,7 +1,8 @@
-use alloc::collections::binary_heap::Iter;
+use alloc::vec::Vec;
 use bootloader_api::{info::{MemoryRegion, MemoryRegionKind, MemoryRegions}, BootInfo};
-use x86_64::{structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate}, PhysAddr, VirtAddr};
-
+use x86_64::{structures::{paging::{PageSize, FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate}}, PhysAddr, VirtAddr};
+use crate::math;
+use crate::info;
 
 pub fn get_physical_memory_offset(boot_info: &BootInfo) -> VirtAddr {
     let memory_regions = boot_info.memory_regions.iter();
@@ -20,17 +21,17 @@ pub fn get_physical_memory_offset(boot_info: &BootInfo) -> VirtAddr {
     let phys_mem_offset = PhysAddr::new(min_addr);
 
     VirtAddr::new(phys_mem_offset.as_u64())
-    
+
 }
 
 pub unsafe fn init_paging(boot_info: &BootInfo) -> OffsetPageTable<'static> {
     let boot_info = boot_info;
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset.into_option().expect("No physical memory offset found"));
-    
+
     let level_4_table = unsafe {
         active_level_4_table(phys_mem_offset)
     };
-    
+
     unsafe {
         OffsetPageTable::new(level_4_table, phys_mem_offset)
     }
@@ -52,12 +53,14 @@ pub fn map_page(
 ) {
     use x86_64::structures::paging::Mapper;
     let map_result = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
-
     map_result.expect("map_to failed").flush();
 }
 
+#[derive(Clone, Debug)]
 pub struct KernelFrameAllocator<'a> {
     memory_map: &'a [MemoryRegion],
+    freeed_frame: Vec<PhysFrame>,
+    use_free_frame: bool,
     next: usize,
 }
 
@@ -65,6 +68,8 @@ impl<'a> KernelFrameAllocator<'a> {
     pub unsafe fn init(boot_info: &'a BootInfo) -> Self {
         KernelFrameAllocator {
             memory_map: &boot_info.memory_regions,
+            freeed_frame: Vec::new(),
+            use_free_frame: false,
             next: 0,
         }
     }
@@ -75,6 +80,19 @@ impl<'a> KernelFrameAllocator<'a> {
         let addr_ranges = usable_regions.map(|r| r.start..r.end);
         let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
+    }
+
+
+    pub fn allocate_frames(&mut self, size: usize) -> Option<Vec<PhysFrame>> {
+        let size_frame = Size4KiB::SIZE;
+
+        let use_frame = math::ceil((size as u64 / size_frame) as f64) as u64;
+        let mut frames = Vec::new();
+        for i in 0..use_frame {
+            frames.push(self.allocate_frame()?);
+        }
+
+        return Some(frames);
     }
 }
 
@@ -93,6 +111,14 @@ impl<'p> PagingManager<'p> {
             mapper,
             frame_allocator,
         }
+    }
+
+    pub fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        return self.frame_allocator.allocate_frame();
+    }
+
+    pub fn allocate_frames(&mut self, size: usize) -> Option<Vec<PhysFrame>> {
+        return self.frame_allocator.allocate_frames(size);
     }
 
     pub fn map_page(
@@ -120,16 +146,31 @@ impl<'p> PagingManager<'p> {
         }
 
     }
-    
-    
+
+
 }
 
 unsafe impl<'a> FrameAllocator<Size4KiB> for KernelFrameAllocator<'a> {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
-        frame
+        if self.use_free_frame {
+            let frame = self.freeed_frame.get(self.next);
+            self.next += 1;
+            return frame.copied();
+        } else {
+            let frame = self.usable_frames().nth(self.next);
+
+            if frame.is_none() {
+                self.use_free_frame = true;
+                return self.allocate_frame();
+            }
+            self.next += 1;
+            frame
+        }
     }
 }
 
-
+impl<'a> FrameDeallocator<Size4KiB> for KernelFrameAllocator<'a>{
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        self.freeed_frame.push(frame);
+    }
+}

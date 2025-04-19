@@ -8,12 +8,14 @@ use x86_64::{
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
 };
 
+use crate::thread;
+
 use crate::{
     context::GLOBAL_CONTEXT,
     drivers::keyboard::{KEYBOARD, Keyboard},
     info,
     io::serial::SerialPortWriter,
-    print, println, println_serial,
+    print, println, println_serial, print_serial
 };
 
 pub static PICS: Mutex<ChainedPics> = Mutex::new(unsafe {

@@ -1,9 +1,8 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![feature(generic_const_exprs)]
 #![feature(iter_next_chunk)]
-#![feature(panic_can_unwind)]
+#![feature(naked_functions)]
 #![allow(static_mut_refs)]
 #![allow(unused)]
 #![feature(ascii_char)]
@@ -26,6 +25,8 @@ mod log;
 mod math;
 mod syscall;
 mod util;
+mod libc;
+mod thread;
 
 use alloc::sync::Arc;
 use alloc::{boxed::Box, vec, vec::Vec};
@@ -106,40 +107,44 @@ pub fn test_keyboard_polling() {
 }
 
 fn keyboard_handler(key_event: KeyEvent, context: &Mutex<Context>) {
-    println_serial!("Key Handler");
     let mut fd = Fd(STDIO.fd());
 
-    write!(fd, "HELLO");
+    write!(fd,"{}", key_event.key.to_string().unwrap_or('?'));
 }
 
 pub fn check_pic_mask() {
     let mask: u8;
     unsafe {
-        core::arch::asm!("in al, 0x21", out("al") mask); // Lire masque du PIC1
+        core::arch::asm!("in al, 0x21", out("al") mask);
     }
     info!("PIC1 Mask: {:#X}", mask);
 }
 
 pub unsafe fn unmask_pic() {
     unsafe {
-        Port::new(0x21).write(0xFDu8); // Unmask IRQ1 (clavier)
+        Port::new(0x21).write(0xFCu8);
         Port::new(0xA1).write(0xFFu8); // Unmask IRQ2 (série)
     }
 }
 
+
+
 pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+    gdt::init_gdt();
+    init_idt();
     init_pic();
     unsafe { unmask_pic() };
-    init_idt();
-    set_keyboard_handler(keyboard_handler);
 
     x86_64::instructions::interrupts::enable();
+
+    set_keyboard_handler(keyboard_handler);
 
     let mut paging_manager = unsafe { allocator::paging::PagingManager::new(boot_info) };
     init_heap(
         &mut paging_manager,
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
     );
+    syscall::init_syscall();
 
     let framebuffer = unsafe {
         FrameBuffer::create_from_raw_addr(
@@ -189,22 +194,32 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         },
     );
 
+
+    for region in boot_info.memory_regions.into_iter() {
+        print_serial!("region start: {:x} ", region.start);
+        print_serial!("region end: {:x} ", region.end);
+        println_serial!("region kind: {:?}", region.kind);
+
+    }
+
     io::port::STDIO.set(stdio.fd());
     let mut disk = drivers::disk::ata::AtaPio::detect_disks();
     let mut last = disk.last().unwrap().clone();
     let mut ext2 = fs::ext2::Ext2FS::from_disk(&mut last).unwrap();
     use fs::FileSystem;
-    let inode: Result<(), fs::Error> = ext2.write_file(2, "popo.txt", "hello world".as_bytes());
-    info!("{}", ext2.is_unallocated(12));
-    let popo = ext2.read_path(fs::Path::new("/popo.txt")).unwrap();
-    let mut file = ext2.read_inode(popo).unwrap();
-    let mut file = ext2.read_file(file).unwrap();
-    // writeln!(stdio, "{:#?}", inode);
-    writeln!(stdio, "{:#?}", core::str::from_utf8(file.as_slice()));
-    let mut context = GLOBAL_CONTEXT.lock();
+    info!("read /hello file");
+    let hello_exe = ext2.read(fs::Path::new("/hello")).unwrap();
+    info!("Execute hello");
+    let mut elf = elf::ProgLoader::from_bytes(&hello_exe).unwrap();
+    //write!(stdio, "elf: {:#?}", elf);
+    elf.execute(&mut paging_manager);
+
+
+
 
     loop {}
 }
+
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
