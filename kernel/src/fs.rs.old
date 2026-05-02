@@ -1,0 +1,347 @@
+pub mod ext2;
+pub mod fat32;
+mod illfs;
+
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+use bitflags::bitflags;
+use crate::io::port::*;
+
+use core::cell::RefCell;
+use alloc::rc::Rc;
+use core::fmt::Display;
+use core::marker::PhantomData;
+
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Error {
+    FileNotFound,
+    CantUseRelPath,
+    RootDirNotFound,
+    NotADirectory,
+    NotAFile,
+    NotEnoughSpace,
+    KernelError(String),
+}
+
+pub trait FileSystem: Send + Sync where Self: 'static  {
+    fn read(&mut self, path: Path) -> Result<Vec<u8>, Error>;
+    fn write(&mut self, path: Path, data: &[u8]) -> Result<(), Error>;
+    fn delete(&mut self, path: Path) -> Result<(), Error>;
+
+    fn read_directory_lazy(&mut self, path: Path) -> Result<Directory, Error>;
+    fn read_directory(&mut self, path: Path, depth: usize) -> Result<Directory, Error> {
+        let mut dir = self.read_directory_lazy(path)?;
+
+        if depth == 0 {
+            return Ok(dir);
+        }
+
+        let mut entries = Vec::new();
+
+        while let Some(entry) = dir.next() {
+            match entry {
+                DirectoryEntry::File(f) => {
+                    entries.push(DirectoryEntry::File(f));
+                }
+                DirectoryEntry::Directory(d) => {
+                    let sub_dir = if d.is_full() {
+                        d.into_full().unwrap()
+                    } else {
+                        self.read_directory(d.absolute_path().clone(), depth - 1)?
+                    };
+
+                    entries.push(DirectoryEntry::Directory(DirectoryRef::Full(sub_dir)));
+                }
+            }
+        }
+
+        Ok(Directory::new(entries, dir.name.clone(), dir.absolute_path.clone()))
+    }
+    fn rename(&mut self, old_path: Path, new_path: Path) -> Result<(), Error>;
+    fn create_directory(&mut self, path: Path) -> Result<(), Error>;
+    fn create_file(&mut self, path: Path) -> Result<(), Error>;
+    fn is_exist(&mut self, path: Path) -> bool {
+        return self.read(path).is_ok();
+    }
+
+    fn open(fs: Rc<RefCell<Self>>, path: &'static str, flags: OpenFlags) -> Result<File, Error> where Self: Sized {
+        let fs_clone = Rc::clone(&fs);
+
+        if !fs_clone.borrow_mut().is_exist(Path::new(path)) {
+            return Err(Error::FileNotFound);
+        }
+
+        let read_clone = Rc::clone(&fs);
+        let write_clone = Rc::clone(&fs);
+
+        Ok(
+            File {
+                fd: new_port(move || read_clone.borrow_mut().read(Path::new(path)).unwrap(),
+                             move |buf| write_clone.borrow_mut().write(Path::new(path), buf).unwrap()),
+                flag: flags,
+            }
+        )
+
+    }
+}
+
+
+#[derive(Debug)]
+pub struct File {
+    fd: Fd,
+    flag: OpenFlags,
+}
+
+impl File {
+    pub fn read(&self) -> Option<Vec<u8>> {
+        if !self.flag.contains(OpenFlags::READ) {
+            return None;
+        }
+
+        self.fd.read()
+    }
+
+    #[must_use]
+    pub fn write(&self, buf: &[u8]) -> Option<()> {
+        if !self.flag.contains(OpenFlags::WRITE) {
+            return None;
+        }
+
+        self.fd.write(buf);
+
+        Some(())
+    }
+
+    pub fn fd(&self) -> Fd {
+        self.fd
+    }
+}
+
+
+
+
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct OpenFlags: u64 {
+        const READ = 1;
+        const WRITE = 1 << 1;
+        const APPEND = 1 << 2;
+        const BINARY = 1 << 3;
+    }
+}
+
+
+
+
+
+
+
+#[derive(Debug, Clone)]
+pub struct Path {
+    parts: Vec<String>,
+    absolute: bool,
+}
+
+impl Path {
+    pub fn new(path: &str) -> Self {
+        let absolute = path.starts_with('/');
+        let parts = path
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .map(|s| s.to_string())
+            .collect();
+
+        Path { parts, absolute }
+    }
+
+    pub fn is_absolute(&self) -> bool {
+        self.absolute
+    }
+
+    pub fn is_relative(&self) -> bool {
+        !self.absolute
+    }
+
+    pub fn components(&self) -> &[String] {
+        &self.parts
+    }
+
+    pub fn join(&self, segment: &str) -> Path {
+        let mut parts = self.parts.clone();
+
+        for part in segment.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                s => {
+                    parts.push(s.to_string());
+                }
+            }
+        }
+
+        Path {
+            parts,
+            absolute: self.absolute,
+        }
+    }
+
+    pub fn to_string(&self) -> String {
+        let mut result = String::new();
+        if self.absolute {
+            result.push('/');
+        }
+
+        result.push_str(&self.parts.join("/"));
+        result
+    }
+}
+
+#[derive(Clone)]
+pub struct FileEntry {
+    name: String,
+    absolute_path: Path,
+}
+
+#[derive(Clone)]
+pub enum DirectoryEntry {
+    File(FileEntry),
+    Directory(DirectoryRef)
+}
+
+impl Display for DirectoryEntry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DirectoryEntry::File(file) => write!(f, "{}", file.name),
+            DirectoryEntry::Directory(dir) => write!(f, "{}/", dir.name()),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum DirectoryRef {
+    Full(Directory),
+    Lazy(DirectoryLazy),
+}
+
+impl DirectoryRef {
+    pub fn name(&self) -> &str {
+        match self {
+            DirectoryRef::Full(d) => &d.name,
+            DirectoryRef::Lazy(d) => &d.name,
+        }
+    }
+
+    pub fn absolute_path(&self) -> &Path {
+        match self {
+            DirectoryRef::Full(d) => &d.absolute_path,
+            DirectoryRef::Lazy(d) => &d.absolute_path,
+        }
+    }
+
+    pub fn is_full(&self) -> bool {
+        matches!(self, DirectoryRef::Full(_))
+    }
+
+    pub fn is_lazy(&self) -> bool {
+        matches!(self, DirectoryRef::Lazy(_))
+    }
+
+    pub fn into_full(self) -> Option<Directory> {
+        match self {
+            DirectoryRef::Full(d) => Some(d),
+            DirectoryRef::Lazy(_) => None,
+        }
+    }
+
+    pub fn into_lazy(self) -> Option<DirectoryLazy> {
+        match self {
+            DirectoryRef::Lazy(d) => Some(d),
+            DirectoryRef::Full(_) => None,
+        }
+    }
+
+
+}
+
+
+#[derive(Clone)]
+pub struct DirectoryLazy {
+    pub name: String,
+    pub absolute_path: Path,
+    current_index: usize,
+}
+
+impl DirectoryLazy {
+    pub fn new(name: String, absolute_path: Path) -> Self {
+        Self {
+            name,
+            absolute_path,
+            current_index: 0,
+        }
+    }
+}
+
+impl DirectoryEntry {
+
+    pub fn is_directory(&self) -> bool {
+        matches!(self, DirectoryEntry::Directory(_))
+    }
+
+    pub fn is_file(&self) -> bool {
+        matches!(self, DirectoryEntry::File(_))
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            DirectoryEntry::File(f) => &f.name,
+            DirectoryEntry::Directory(d) => &d.name()
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Directory {
+    entries: Vec<DirectoryEntry>,
+    name: String,
+    absolute_path: Path,
+    current_index: usize,
+}
+
+impl Directory {
+    pub fn new(entries: Vec<DirectoryEntry>, name: String, absolute_path: Path) -> Self {
+        Self {
+            entries,
+            name,
+            absolute_path,
+            current_index: 0
+        }
+    }
+
+    fn next(&mut self) -> Option<DirectoryEntry> {
+        if self.current_index >= self.entries.len() {
+            None
+        } else {
+            let res = Some(self.entries[self.current_index].clone());
+            self.current_index += 1;
+            res
+        }
+
+
+    }
+}
+
+
+impl Iterator for Directory {
+    type Item = DirectoryEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next()
+    }
+}

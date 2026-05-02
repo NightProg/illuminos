@@ -9,4 +9,4 @@ qemu-system-x86_64 -enable-kvm \
   -serial stdio \
   -device ide-hd,drive=disk -drive if=none,file=disk.img,format=raw,id=disk \
   -d cpu,int,guest_errors,cpu_reset \
-  -D qemu.log 
+  -D qemu.log -S -s
