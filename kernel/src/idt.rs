@@ -133,6 +133,7 @@ extern "x86-interrupt" fn page_fault_handler(
     use x86_64::registers::control::Cr2;
     let faulting_address = Cr2::read();
     let from_user = stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3;
+    println!("PAGE FAULT\n");
     if from_user {
         crate::io::stdout::write(b"Segmentation fault\n");
         crate::thread::task_exit();
@@ -168,15 +169,13 @@ extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
 extern "x86-interrupt" fn timer_handler(stack_frame: InterruptStackFrame) {
     let mut stack_frame = stack_frame;
     TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let from_user = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
-
-    if from_user {
-        deliver_signals_irq(&mut stack_frame);
-    }
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8())
     };
+    if SCHEDULER.try_lock().is_none() {
+        return;
+    }
     schedule();
 }
 

@@ -7,14 +7,14 @@ pub type SignalHandler = u64;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SignalState {
     pub pending: u64,
-    pub handlers: [SignalHandler; 8],
+    pub handlers: [SignalHandler; 32],
 }
 
 impl SignalState {
     pub const fn new() -> Self {
         Self {
             pending: 0,
-            handlers: [0; 8],
+            handlers: [0; 32],
         }
     }
 

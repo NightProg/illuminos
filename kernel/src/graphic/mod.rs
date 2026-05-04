@@ -1,18 +1,17 @@
 use core::ops::{Add, Deref, Div, Mul, Sub};
-
+// 0xFFFF_A000_0000_0000
 use alloc::vec;
 use alloc::vec::Vec;
 use bootloader_api::info::PixelFormat;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
-
+pub mod console;
 pub mod font;
 pub mod framebuffer;
+pub mod text_buffer;
 pub mod vram;
 pub mod window;
-pub mod text_buffer;
-pub mod console;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Color {

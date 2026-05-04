@@ -1,9 +1,7 @@
-
-
-pub struct IterPtr<T>   {
+pub struct IterPtr<T> {
     ptr: *mut T,
     size: usize,
-    current: usize
+    current: usize,
 }
 
 impl<T> IterPtr<T> {
@@ -11,10 +9,9 @@ impl<T> IterPtr<T> {
         Self {
             ptr,
             size,
-            current: 0
+            current: 0,
         }
     }
-
 }
 
 impl<T> Iterator for IterPtr<T> {
@@ -25,16 +22,10 @@ impl<T> Iterator for IterPtr<T> {
             None
         } else {
             self.current += 1;
-            Some(unsafe {
-                self.ptr.add(self.current)
-            })
-        
+            Some(unsafe { self.ptr.add(self.current) })
         }
     }
 }
-
-
-
 
 #[macro_export]
 macro_rules! print {
@@ -58,4 +49,29 @@ macro_rules! format {
         write!(&mut buffer, $($arg)*).unwrap();
         buffer
     });
+}
+
+#[macro_export]
+macro_rules! dbg {
+    () => {
+        $crate::println!("[{}:{}:{}]", file!(), line!(), column!())
+    };
+    ($val:expr $(,)?) => {
+        match $val {
+            tmp => {
+                $crate::println!(
+                    "[{}:{}:{}] {} = {:#?}",
+                    file!(),
+                    line!(),
+                    column!(),
+                    stringify!($val),
+                    tmp
+                );
+                tmp
+            }
+        }
+    };
+    ($($val:expr),+ $(,)?) => {
+        ($($crate::dbg!($val)),+,)
+    };
 }

@@ -2,7 +2,6 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 #![feature(iter_next_chunk)]
-#![feature(naked_functions)]
 #![allow(static_mut_refs)]
 #![allow(unused)]
 #![feature(ascii_char)]
@@ -60,6 +59,7 @@ use io::port::{Fd, STDOUT};
 use log::set_log_output;
 use math::vec2;
 use spin::Mutex;
+use x86_64::structures::paging::PageTable;
 
 use crate::allocator::paging::KERNEL_PAGING_MANAGER;
 use crate::context::app_ready;
@@ -76,7 +76,7 @@ use crate::idt::TICKS;
 use crate::io::port::new_port;
 use crate::io::stdout;
 use crate::log::LogOutput;
-use crate::thread::{SCHEDULER, exit, schedule, yield_now};
+use crate::thread::{SCHEDULER, exit, gc_task, schedule, yield_now};
 use bootloader_api::{
     BootInfo, BootloaderConfig,
     config::Mapping,
@@ -98,14 +98,15 @@ use x86_64::{
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings.framebuffer = Mapping::FixedAddress(VRAM_VIRT_ADDR);
-    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config.mappings.kernel_stack = Mapping::FixedAddress(0xFFFF_FFFF_8000_0000);
+    //config.mappings.physical_memory = Some(Mapping::FixedAddress(0xFFFF_8000_0000_0000));
     config
 };
 
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn keyboard_handler(event: &KeyEvent) {
-    println!("1[INFO] Keyboard event: {:?}", event);
+    println!("[INFO] Keyboard event: {:?}", event);
 }
 
 extern "C" fn task_hello_world() {
@@ -137,9 +138,63 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         gdt::init_gdt();
     };
 
+    println_serial!("the addr of kernel_main is {:#x}", kernel_main as usize);
+
     let mut paging_manager = unsafe { allocator::paging::PagingManager::new(boot_info) };
 
     KERNEL_PAGING_MANAGER.lock().insert(paging_manager);
+
+    for (i, entry) in KERNEL_PAGING_MANAGER
+        .lock()
+        .as_ref()
+        .unwrap()
+        .mapper
+        .level_4_table()
+        .iter()
+        .enumerate()
+    {
+        if !entry.is_unused() {
+            crate::println_serial!("PML4[{}] = {:#x}", i, entry.addr().as_u64());
+        }
+    }
+
+    fn print_pml4_entry(phys_offset: VirtAddr, pml4: &PageTable, i: usize) {
+        if pml4[i].is_unused() {
+            return;
+        }
+        let pdpt: &PageTable = unsafe { &*((phys_offset + pml4[i].addr().as_u64()).as_ptr()) };
+        for j in 0..512 {
+            if !pdpt[j].is_unused() {
+                let virt = (i as u64) << 39 | (j as u64) << 30;
+                crate::println_serial!(
+                    "  [{}/{}] virt={:#x} phys={:#x}",
+                    i,
+                    j,
+                    virt,
+                    pdpt[j].addr().as_u64()
+                );
+            }
+        }
+    }
+
+    let phys_offset = KERNEL_PAGING_MANAGER
+        .lock()
+        .as_ref()
+        .unwrap()
+        .mapper
+        .phys_offset();
+    {
+        let kernel_paging_manager = KERNEL_PAGING_MANAGER.lock();
+        let kernel_pml4 = kernel_paging_manager
+            .as_ref()
+            .unwrap()
+            .mapper
+            .level_4_table();
+
+        print_pml4_entry(phys_offset, kernel_pml4, 0);
+        print_pml4_entry(phys_offset, kernel_pml4, 2);
+        print_pml4_entry(phys_offset, kernel_pml4, 3);
+    }
 
     {
         let mut paging_manager_lock = KERNEL_PAGING_MANAGER.lock();
@@ -223,10 +278,29 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             stdout::flush(&mut console);
         }
     }*/
+
+    #[derive(Debug)]
+    #[repr(C, packed)]
+    struct Idtr {
+        limit: u16,
+        base: u64,
+    }
+    let mut idtr = Idtr { limit: 0, base: 0 };
+    unsafe {
+        core::arch::asm!("sidt [{}]", in(reg) &mut idtr, options(nostack));
+        println_serial!("IDTR base: {:#x}, limit: {:#x}", { idtr.base }, {
+            idtr.limit
+        });
+    }
+    println_serial!("IDT static addr: {:#x}", &*idt::IDT as *const _ as u64);
+    println_serial!("IDTR base: {:#x}", { idtr.base });
+    println_serial!("IDTR: {:?}\n", idtr);
+
     crate::println!("[INFO] Starting scheduler");
     unsafe {
-        SCHEDULER.lock().add_task(console_task);
-        SCHEDULER.lock().add_task(task_hello_world);
+        SCHEDULER.lock().add_kernel_task(console_task);
+        SCHEDULER.lock().add_kernel_task(gc_task);
+        SCHEDULER.lock().add_kernel_task(task_hello_world);
         SCHEDULER.lock().ready();
 
         schedule();

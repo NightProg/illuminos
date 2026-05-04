@@ -13,6 +13,8 @@
 #define SYS_FB_SWAP 7
 #define SYS_SIGNAL 8
 #define SYS_RAISE  9
+#define SYS_FORK 10
+#define SYS_GETPID 11
 
 #define SIG_KILL   1
 #define SIG_PAUSE  2
@@ -28,7 +30,7 @@
 #define O_TRUNC  (1 << 3)
 
 #define FD_INVALID  UINT64_MAX
-#define ERR_SYSCALL 0xFF
+#define ERR_SYSCALL UINT64_MAX
 
 typedef void (*signal_handler_t)(void);
 
@@ -63,6 +65,19 @@ static inline uint64_t _syscall3(uint64_t id,
     );
     return r9;
 }
+
+static inline uint64_t _syscall0_ret(uint64_t id) {
+    uint64_t ret;
+    register uint64_t r9 asm("r9") = 0;
+    asm volatile (
+        "syscall"
+        : "=a"(ret), "+r"(r9)
+        : "a"(id)
+        : "rcx", "r11", "memory"
+    );
+    return (r9 == ERR_SYSCALL) ? UINT64_MAX : ret;
+}
+
 
 #define _syscall0(id)     _syscall3((id), 0, 0, 0)
 #define _syscall1(id,a)   _syscall3((id), (uint64_t)(a), 0, 0)
@@ -117,6 +132,15 @@ static inline int sys_signal(uint64_t signum, signal_handler_t handler) {
 static inline int sys_raise(uint64_t pid, uint64_t signum) {
     uint64_t err = _syscall2(SYS_RAISE, pid, signum);
     return (err == ERR_SYSCALL) ? -1 : 0;
+}
+
+static inline uint64_t sys_fork(void) {
+    return _syscall0_ret(SYS_FORK);
+}
+static inline uint64_t sys_getpid(void) {
+    uint64_t pid = 0;
+    uint64_t err = _syscall1(SYS_GETPID, (uint64_t)(uintptr_t)&pid);
+    return (err == ERR_SYSCALL) ? UINT64_MAX : pid;
 }
 
 static inline int sys_fb_info(fb_info_t *info)

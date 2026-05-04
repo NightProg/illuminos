@@ -7,9 +7,9 @@ use crate::graphic::framebuffer::FrameBuffer;
 use crate::graphic::text_buffer::TextBuffer;
 use crate::io::port::Fd;
 use crate::io::{stdin, stdout};
-use crate::println;
 use crate::thread::process::Process;
 use crate::thread::{SCHEDULER, yield_now};
+use crate::{println, thread};
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -112,17 +112,19 @@ type 'help' for a list of commands
                         inode.lock().read_at(0, &mut buf).unwrap();
                         let mut elf = ElfProcess::new(&buf);
                         if let Some(rip) = elf.load() {
-                            let mut process = Process::new(*elf.get_page_table());
-                            let task = process.spawn_user_thread(rip);
+                            let process = Process::create(*elf.get_page_table());
+
+                            let task = thread::process::spawn(process, rip).unwrap();
                             self.is_task_running.store(true, Ordering::SeqCst);
                             let is_running_clone = self.is_task_running.clone();
-                            SCHEDULER.lock().register_exit_callback(
+                            thread::process::wait_all();
+                            is_running_clone.store(false, Ordering::SeqCst);
+                            /*SCHEDULER.lock().register_exit_callback(
                                 task,
                                 Box::new(move || {
                                     is_running_clone.store(false, Ordering::SeqCst);
-                                    // On ne peut pas facilement vider stdout ici car on n'a pas accès à la console
                                 }),
-                            );
+                            );*/
                         } else {
                             self.write_str(
                                 "Error: Failed to load ELF (paging manager not initialized? or malformed ELF)\n",

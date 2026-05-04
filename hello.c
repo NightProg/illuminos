@@ -1,13 +1,12 @@
 #include "c/syscall.h"
-#include <stdio.h>
+#include <stdint.h>
 
 
-void putstr(const char *s)
-{
-    while (*s) {
-        sys_write(1, s, 1);
-        s++;
-    }
+
+void putstr(const char *s) {
+    size_t len = 0;
+    while (s[len]) len++;
+    sys_write(1, s, len);  // ← écriture atomique
 }
 
 void putint(int n)
@@ -21,13 +20,11 @@ void putint(int n)
     }
 
     while (n > 0) {
-        buf[i++] = '0' + (n % 10);
+        buf[11 - i++] = '0' + (n % 10);
         n /= 10;
     }
 
-    for (int j = i - 1; j >= 0; j--) {
-        sys_write(1, &buf[j], 1);
-    }
+    sys_write(1, buf + (12 - i), i);
 }
 
 void page_fault_handler()
@@ -39,10 +36,22 @@ void page_fault_handler()
 
 void _start(void)
 {
-    putstr("Provoking a page fault by writing to a null pointer...\n");
-    sys_signal(SIG_PAGE_FAULT, page_fault_handler);
-    int *ptr = NULL;
-    *ptr = 42; // This will cause a page fault
+    uint64_t pid = sys_fork();
 
-    sys_exit();
+    if (pid == 0) {
+        // Child process
+        putstr("Hello from the child process!: ");
+        putint(pid);
+        putstr("\n");
+        sys_exit();
+    } else if (pid == UINT64_MAX) {
+        putstr("FORK FAILED\n");
+        sys_exit();
+    } else {
+        putstr("HELLO from the parent process: ");
+        putint(pid);
+        putstr("\n");
+        sys_exit();
+    }
+
 }

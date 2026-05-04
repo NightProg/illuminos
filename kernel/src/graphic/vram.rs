@@ -1,20 +1,18 @@
-use crate::io::{inl, outl};
 use crate::io::pci::{pci_read, pci_read_bar};
+use crate::io::{inl, outl};
 
-pub const VRAM_VIRT_ADDR: u64 = 0xAFF0_0000;
+pub const VRAM_VIRT_ADDR: u64 = 0xFFFF_A000_0000_0000;
 
 pub fn find_gpu() -> Option<(u8, u8, u8)> {
     for bus in 0..=255 {
         for device in 0..=31 {
             for function in 0..=7 {
-                let vendor_id = unsafe {
-                    pci_read(bus, device, function, 0x00) & 0xFFFF
-                };
-                if vendor_id == 0xFFFF { continue; } 
+                let vendor_id = unsafe { pci_read(bus, device, function, 0x00) & 0xFFFF };
+                if vendor_id == 0xFFFF {
+                    continue;
+                }
 
-                let class_code = unsafe {
-                    pci_read(bus, device, function, 0x08) >> 24
-                };
+                let class_code = unsafe { pci_read(bus, device, function, 0x08) >> 24 };
                 if class_code == 0x03 {
                     return Some((bus, device, function));
                 }
@@ -25,20 +23,16 @@ pub fn find_gpu() -> Option<(u8, u8, u8)> {
 }
 
 pub fn get_vram_addr((bus, device, function): (u8, u8, u8)) -> Option<u32> {
-
     for bar_index in 0..6 {
-        let bar = unsafe {
-            pci_read_bar(bus, device, function, bar_index)
-        };
+        let bar = unsafe { pci_read_bar(bus, device, function, bar_index) };
         if (bar & 0x1) == 0 {
             let addr = bar & !0xF;
             return Some(addr);
         }
     }
-    
+
     None
 }
-
 
 pub fn unmap_vram(addr: u32) {
     unsafe {

@@ -18,7 +18,7 @@ use crate::println;
 
 use super::paging::{PagingManager, map_page};
 
-pub const KERNEL_HEAP_START: VirtAddr = VirtAddr::new(0xFFFF_8000_0000_0000);
+pub const KERNEL_HEAP_START: VirtAddr = VirtAddr::new(0xFFFF_C000_0000_0000); // PML4[384] → libre
 pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 100; // 500 Mo
 
 pub const USER_HEAP_START: VirtAddr = VirtAddr::new(0x4444_4444_4444);
@@ -87,6 +87,3 @@ pub fn reserve_memory(
         map_page(page, frame, mapper, frame_allocator, flags);
     }
 }
-
-
-

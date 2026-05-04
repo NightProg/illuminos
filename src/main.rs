@@ -11,6 +11,7 @@ fn main() {
     let debug = args.len() > 1 && args[1] == "debug";
     let uefi_path = env!("UEFI_PATH");
     let bios_path = env!("BIOS_PATH");
+    println!("UEFI_PATH: {}", uefi_path);
 
     let uefi = std::env::var("ILLUMINOS_USE_BIOS_BOOT").is_err();
 
@@ -43,7 +44,7 @@ fn main() {
     ]);
 
     cmd.arg("-enable-kvm");
-    cmd.arg("-m").arg("500M");
+    cmd.arg("-m").arg("1G");
 
     if debug {
         cmd.arg("-s").arg("-S");
