@@ -1,6 +1,8 @@
 use alloc::collections::VecDeque;
 use spin::Mutex;
 
+use crate::fs::Inode;
+
 pub static STDIN_BUFFER: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 
 pub fn pop_back() -> Option<u8> {
@@ -66,5 +68,47 @@ pub fn flush(out: &mut impl core::fmt::Write) {
     while let Some(b) = temp_buf.pop_front() {
         let c = b as char;
         let _ = out.write_char(c);
+    }
+}
+
+pub struct StdinDevice;
+
+impl Inode for StdinDevice {
+    fn as_directory(&mut self) -> Option<&dyn crate::fs::DirectoryInode> {
+        None
+    }
+
+    fn kind(&self) -> crate::fs::InodeKind {
+        crate::fs::InodeKind::Pipe
+    }
+
+    fn size(&mut self) -> u64 {
+        STDIN_BUFFER.lock().len() as u64
+    }
+
+    fn inner_as_any(&mut self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn inner_as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> crate::fs::Result<usize> {
+        let mut i = 0;
+        while i < buf.len() {
+            if let Some(b) = crate::io::stdin::pop() {
+                buf[i] = b;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+
+        Ok(i)
+    }
+
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> crate::fs::Result<usize> {
+        Err("stdin not writtable".into())
     }
 }

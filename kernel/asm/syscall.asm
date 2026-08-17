@@ -1,6 +1,8 @@
 .globl sys_handler
 sys_handler:
-    push rsp
+    mov [sys_scratch_rsp], rsp
+    mov rsp, [CURRENT_KERNEL_STACK]
+    push [sys_scratch_rsp]
     push r15
     push r14
     push r13
@@ -38,3 +40,6 @@ sys_handler:
     pop r15
     pop rsp
     sysretq
+
+.data
+sys_scratch_rsp: .quad 0

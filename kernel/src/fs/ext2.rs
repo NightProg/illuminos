@@ -5,8 +5,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::drivers::disk::Disk;
-use crate::{info, math, println};
 use crate::fs::{Directory, DirectoryLazy, DirectoryRef, Error, Path};
+use crate::{info, math, println};
 
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
@@ -114,7 +114,17 @@ impl Ext2SuperBlock {
         let sectors = self.get_sector_for_block(block_id);
         let mut off = 0;
         for sector in sectors {
-            disk.write_sector(sector as u64, &buf[off..off + 512]);
+            if off + 512 <= buf.len() {
+                disk.write_sector(sector as u64, &buf[off..off + 512]);
+            } else {
+                let mut tmp = [0u8; 512];
+                let rem = buf.len().saturating_sub(off);
+                let to_copy = core::cmp::min(512, rem);
+                if to_copy > 0 {
+                    tmp[..to_copy].copy_from_slice(&buf[off..off + to_copy]);
+                }
+                disk.write_sector(sector as u64, &tmp);
+            }
             off += 512;
         }
         Ok(())
@@ -333,7 +343,6 @@ impl Ext2BlockGroupDescriptor {
         Some(v)
     }
 
-
     pub fn flush(&self, superblock: Ext2SuperBlock, disk: &mut impl Disk) -> Result<(), String> {
         let x = unsafe {
             core::slice::from_raw_parts(
@@ -531,7 +540,6 @@ pub struct DirectoryEntry {
 }
 
 impl DirectoryEntry {
-
     pub fn from_slice(buf: &[u8]) -> Option<(Self, usize)> {
         let inode = u32::from_le_bytes(buf[0..4].try_into().ok()?);
         let rec_len = u16::from_le_bytes(buf[4..6].try_into().ok()?);
@@ -553,7 +561,6 @@ impl DirectoryEntry {
             rec_len as usize,
         ))
     }
-
 
     pub fn name(&self) -> Option<&str> {
         core::str::from_utf8(&self.name[..self.name_length as usize]).ok()
@@ -614,7 +621,6 @@ pub struct Ext2FS<T: Disk + Clone> {
 
     block_cache: BTreeMap<u32, Vec<u8>>,
     inode_cache: BTreeMap<u32, Inode>,
-
 }
 
 impl<T> Ext2FS<T>
@@ -725,11 +731,7 @@ where
         Ok(data)
     }
 
-
-    pub fn read_directory_inode(
-        &mut self,
-        inode_num: u32,
-    ) -> Result<Vec<DirectoryEntry>, Error> {
+    pub fn read_directory_inode(&mut self, inode_num: u32) -> Result<Vec<DirectoryEntry>, Error> {
         let inode = self.read_inode(inode_num).ok_or(Error::FileNotFound)?;
 
         let mut entries = Vec::new();
@@ -745,7 +747,6 @@ where
 
             while offset < block_size {
                 let (entry, rec_len) = DirectoryEntry::from_slice(&data[offset..]).unwrap();
-
 
                 if entry.inode == 0 {
                     offset += entry.entry_size as usize;
@@ -793,9 +794,7 @@ where
 
         for (i, comp) in comps.iter().enumerate() {
             current_inode = self.read_inode_by_name(current_inode, comp)?;
-            let inode = self
-                .read_inode(current_inode)
-                .ok_or(Error::FileNotFound)?;
+            let inode = self.read_inode(current_inode).ok_or(Error::FileNotFound)?;
 
             if !inode.is_dir() && i != comps.len() - 1 {
                 return Err(Error::NotADirectory);
@@ -1031,8 +1030,7 @@ where
                     .cloned()
                     .map(|x: DirectoryEntry| x.entry_size as usize)
                     .unwrap_or(0)
-                    + size_of::<DirectoryEntry>())
-                    as u16;
+                    + size_of::<DirectoryEntry>()) as u16;
                 entry = new_entry.clone();
                 entries.push(entry.clone());
             }
@@ -1281,48 +1279,45 @@ where
         Ok(())
     }
 
-
-    fn read_directory_entry(&mut self, de: DirectoryEntry, parent: Path) -> Result<super::DirectoryEntry, Error> {
+    fn read_directory_entry(
+        &mut self,
+        de: DirectoryEntry,
+        parent: Path,
+    ) -> Result<super::DirectoryEntry, Error> {
         let inode = self.read_inode(de.inode).ok_or(Error::FileNotFound)?;
         let name = de.name().unwrap_or("");
         if inode.is_file() {
             println!("BREAKPOINT 2.1");
-            Ok(super::DirectoryEntry::File(
-                super::FileEntry {
-                    name: name.to_string(),
-                    absolute_path: parent.join(name)
-                }
-            ))
+            Ok(super::DirectoryEntry::File(super::FileEntry {
+                name: name.to_string(),
+                absolute_path: parent.join(name),
+            }))
         } else {
             let mut new_entries = Vec::new();
 
-            Ok(
-                super::DirectoryEntry::Directory(
-                    DirectoryRef::Full(Directory::new(new_entries, name.to_string(), parent.join(name)))
-                )
-            )
+            Ok(super::DirectoryEntry::Directory(DirectoryRef::Full(
+                Directory::new(new_entries, name.to_string(), parent.join(name)),
+            )))
         }
     }
 
-    pub fn read_depth_1_dir_entry(&mut self, de: DirectoryEntry, parent: Path) -> Result<super::DirectoryEntry, Error> {
+    pub fn read_depth_1_dir_entry(
+        &mut self,
+        de: DirectoryEntry,
+        parent: Path,
+    ) -> Result<super::DirectoryEntry, Error> {
         let inode = self.read_inode(de.inode).ok_or(Error::FileNotFound)?;
         let name = de.name().unwrap_or("");
         if inode.is_file() {
-            Ok(super::DirectoryEntry::File(
-                super::FileEntry {
-                    name: name.to_string(),
-                    absolute_path: parent.join(name)
-                }
-            ))
+            Ok(super::DirectoryEntry::File(super::FileEntry {
+                name: name.to_string(),
+                absolute_path: parent.join(name),
+            }))
         } else {
-
-            Ok(
-                super::DirectoryEntry::Directory(
-                    DirectoryRef::Lazy(DirectoryLazy::new(name.to_string(), parent.join(name)))
-                )
-            )
+            Ok(super::DirectoryEntry::Directory(DirectoryRef::Lazy(
+                DirectoryLazy::new(name.to_string(), parent.join(name)),
+            )))
         }
-
     }
 
     pub fn flush(&mut self) {

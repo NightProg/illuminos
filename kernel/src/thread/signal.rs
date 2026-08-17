@@ -88,7 +88,7 @@ pub fn deliver_signals_irq(frame: &mut InterruptStackFrame) {
     debug!("Delivering signal: {:?}, handler={:X}", sig, handler);
 
     if sig == Signal::Kill {
-        crate::thread::task_exit();
+        crate::thread::exit(137);
     }
 
     if handler == 0 {
@@ -101,9 +101,9 @@ pub fn deliver_signals_irq(frame: &mut InterruptStackFrame) {
         let user_rsp = *frame_ptr.add(3);
 
         let new_rsp = user_rsp - 8;
-        *(new_rsp as *mut u64) = saved_rip; // push sur stack user
+        *(new_rsp as *mut u64) = saved_rip; 
 
-        *frame_ptr.add(0) = handler; // rip → handler
-        *frame_ptr.add(3) = new_rsp; // rsp → new_rsp
+        *frame_ptr.add(0) = handler;
+        *frame_ptr.add(3) = new_rsp;
     }
 }

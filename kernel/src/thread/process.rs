@@ -1,18 +1,38 @@
 use crate::{
-    allocator::{paging::KERNEL_PAGING_MANAGER, process_paging::ProcessPageTable},
+    allocator::{
+        mmap::{self, MMAP_BASE},
+        paging::KERNEL_PAGING_MANAGER,
+        process_paging::ProcessPageTable,
+        vma::{self, MapFlags, ProtFlags, VMA},
+    },
+    context::GLOBAL_CONTEXT,
     dbg,
+    elf::ElfProcess,
+    fs::{FdTable, Inode, OpenFile, OpenFlags},
     gdt::KERNEL_STACK_SIZE,
+    io::pipe::Pipe,
     println, println_serial,
+    sync::mutex::TimeoutMutex,
     syscall::SyscallCtx,
     thread::{Task, iretq_trampoline, yield_now},
+    tty::session::SessionId,
 };
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::btree_map::BTreeMap,
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec::{self, Vec},
+};
 use core::{hint::unreachable_unchecked, sync::atomic::AtomicU64};
+use illfs::InOutDevice;
 use x86_64::{
-    PhysAddr, VirtAddr,
+    PhysAddr, VirtAddr, align_up,
     registers::control::{Cr3, Cr3Flags},
     structures::paging::{
-        FrameAllocator, Mapper, OffsetPageTable, PageTable, PageTableFlags, PhysFrame, Size4KiB,
+        FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, PageTable, PageTableFlags,
+        PhysFrame, Size4KiB, Translate,
     },
 };
 
@@ -22,7 +42,7 @@ use crate::thread::{SCHEDULER, Scheduler};
 
 pub static PID: AtomicU64 = AtomicU64::new(1);
 
-pub static PROCESSES: Mutex<BTreeMap<Pid, Process>> = Mutex::new(BTreeMap::new());
+pub static PROCESSES: TimeoutMutex<BTreeMap<Pid, Process>> = TimeoutMutex::new(BTreeMap::new());
 
 pub const USER_STACK_TOP: u64 = 0x0000_7FFF_FF00_0000;
 pub const USER_STACK_SIZE: u64 = 0x8000;
@@ -35,20 +55,53 @@ pub enum ProcessState {
     Terminated,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProcessArguments {
+    pub argv: Vec<String>,
+    pub envp: Vec<String>,
+}
+
 pub type Pid = u64;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Process {
     pub pid: Pid,
+    pub brk: u64,
+    pub current_session: Option<SessionId>,
+    pub brk_start: u64,
     pub pml4_table: ProcessPageTable,
     pub state: ProcessState,
     pub tasks: Vec<usize>,
+    pub open_files: Arc<FdTable>,
+    pub vmas: Vec<VMA>,
+    pub arguments: Option<ProcessArguments>,
+    pub exit_code: Option<u8>,
+    pub exit_callbacks: Vec<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl core::fmt::Debug for Process {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Process")
+            .field("pid", &self.pid)
+            .field("state", &self.state)
+            .field("tasks", &self.tasks)
+            .field("open_files_count", &self.open_files.len())
+            .field("vmas", &self.vmas)
+            .field("current_session", &self.current_session)
+            .finish()
+    }
 }
 
 impl Process {
-    pub fn create(pml4_table: ProcessPageTable) -> Pid {
+    pub fn create(
+        pml4_table: ProcessPageTable,
+        vmas: &[VMA],
+        process_argument: Option<ProcessArguments>,
+        session: Option<SessionId>,
+        brk_start: u64,
+    ) -> Pid {
         let mut processes_lock = PROCESSES.lock();
-        let process = Process::new(pml4_table);
+        let process = Process::new(pml4_table, vmas, process_argument, session, brk_start);
         let pid = process.pid;
         processes_lock.insert(pid, process);
         pid
@@ -60,61 +113,48 @@ impl Process {
             pml4_table: ProcessPageTable::kernel(),
             state: ProcessState::Ready,
             tasks: Vec::new(),
+            open_files: Arc::new(FdTable::new_std()),
+            vmas: Vec::new(),
+            arguments: None,
+            exit_code: None,
+            exit_callbacks: Vec::new(),
+            brk: 0,
+            brk_start: 0,
+            current_session: None,
         }
     }
 
-    pub fn new(pml4_table: ProcessPageTable) -> Self {
+    pub fn new(
+        pml4_table: ProcessPageTable,
+        vmas: &[VMA],
+        process_argument: Option<ProcessArguments>,
+        session: Option<SessionId>,
+        brk_start: u64,
+    ) -> Self {
         Process {
             pid: PID.fetch_add(1, core::sync::atomic::Ordering::SeqCst),
             pml4_table,
             state: ProcessState::Ready,
             tasks: Vec::new(),
+            open_files: Arc::new(FdTable::new_std()),
+            vmas: vmas.to_vec(),
+            arguments: process_argument,
+            exit_code: None,
+            exit_callbacks: Vec::new(),
+            brk: brk_start,
+            brk_start,
+            current_session: session,
         }
     }
 
-    /*pub unsafe fn exec(&self) -> ! {
-        unsafe {
-            let (kernel_frame, _) = Cr3::read();
-            let mut paging_manager_lock = KERNEL_PAGING_MANAGER.lock();
-            let phys_offset = paging_manager_lock
-                .as_ref()
-                .expect("KERNEL_PAGING_MANAGER not initialized before exec")
-                .mapper
-                .phys_offset();
-            drop(paging_manager_lock); // Release lock before possible prints or context switch
+    pub fn add_to_processes(&self) {
+        let mut processes_lock = PROCESSES.lock();
+        processes_lock.insert(self.pid, self.clone());
+    }
 
-            let rip: u64;
-            core::arch::asm!("lea {}, [rip]", out(reg) rip);
-            crate::println_serial!("exec RIP = {:#x}", rip);
-
-            // PML4 index de cette adresse
-            let pml4_idx = (rip >> 39) & 0x1FF;
-            crate::println_serial!("PML4 index = {}", pml4_idx);
-
-            // Vérifier aussi le nouveau PML4
-            let new_pml4_virt = phys_offset + self.pml4_frame.start_address().as_u64();
-            let new_pml4: &PageTable = unsafe { &*(new_pml4_virt.as_ptr()) };
-            for i in 256..512 {
-                if !new_pml4[i].is_unused() {
-                    crate::println_serial!("new PML4[{}] = {:?}", i, new_pml4[i]);
-                }
-            }
-            crate::println_serial!(
-                "(1) iretq → rip={:#x} rsp={:#x} cr3={:#x}",
-                self.rip.as_u64(),
-                self.rsp.as_u64(),
-                self.pml4_frame.start_address().as_u64()
-            );
-            Cr3::write(self.pml4_frame, Cr3Flags::empty());
-            crate::println_serial!(
-                "(2) iretq → rip={:#x} rsp={:#x} cr3={:#x}",
-                self.rip.as_u64(),
-                self.rsp.as_u64(),
-                self.pml4_frame.start_address().as_u64()
-            );
-            jump_to_user(self.rip, self.rsp);
-        }
-    }*/
+    pub fn add_exit_callback<F: Fn() + Send + Sync + 'static>(&mut self, callback: F) {
+        self.exit_callbacks.push(Arc::new(callback));
+    }
 
     pub fn spawn_user_thread_with_stack(
         &mut self,
@@ -156,6 +196,17 @@ impl Process {
         );
 
         let stack_top = stack_base + USER_STACK_SIZE;
+
+        self.vmas.push(VMA {
+            start: stack_base.as_u64(),
+            end: stack_top.as_u64(),
+            flags: MapFlags::PRIVATE | MapFlags::ANONYMOUS,
+            prot: ProtFlags::READ | ProtFlags::WRITE,
+            file: None,
+            offset: 0,
+            phys_addr: None,
+        });
+
         self.add_to_scheduler(entry_point, stack_top)
     }
 
@@ -166,6 +217,7 @@ impl Process {
             self.pml4_table.pml4_frame.start_address().as_u64(),
             KERNEL_STACK_SIZE,
             self.pid,
+            self.arguments.clone(),
         );
 
         self.tasks.push(task_id);
@@ -182,83 +234,138 @@ impl Process {
         let scheduler = SCHEDULER.lock();
         self.tasks.iter().all(|&task_id| {
             if let Some(task) = scheduler.tasks.get(&task_id) {
-                task.state == crate::thread::TaskState::Zombie
+                matches!(task.state, crate::thread::TaskState::Zombie(_))
             } else {
-                true // Si la tâche n'est pas trouvée, on considère qu'elle est terminée
+                true
             }
         })
     }
 
-    pub fn free_resources(&mut self) {
+    pub fn open_file_path(&mut self, path: &str, flags: OpenFlags) -> Result<usize, String> {
+        let file = GLOBAL_CONTEXT.fs.lock().open_file(path, flags)?;
+        Ok(self.open_files.open(Arc::new(Mutex::new(file))))
+    }
+
+    pub fn open_inode<I: Inode + 'static>(
+        &mut self,
+        inode: I,
+        flags: OpenFlags,
+    ) -> Result<usize, String> {
+        let file = OpenFile::new(Arc::new(spin::Mutex::new(inode)), flags);
+
+        Ok(self.open_files.open(Arc::new(Mutex::new(file))))
+    }
+
+    pub fn read_file(&self, fd: usize, buf: &mut [u8]) -> Result<usize, String> {
+        if let Some(mut open_file) = self.open_files.get(fd) {
+            let mut open_file_lock = open_file.lock();
+            open_file_lock.read(buf)
+        } else {
+            Err(format!("Invalid file descriptor: {}", fd))
+        }
+    }
+
+    pub fn write_file(&self, fd: usize, buf: &[u8]) -> Result<usize, String> {
+        if let Some(mut open_file) = self.open_files.get(fd) {
+            let mut open_file_lock = open_file.lock();
+            open_file_lock.write(buf)
+        } else {
+            Err(format!("Invalid file descriptor: {}", fd))
+        }
+    }
+
+    pub fn close_file(&mut self, fd: usize) -> Result<(), String> {
+        if self.open_files.close(fd).is_some() {
+            Ok(())
+        } else {
+            Err(format!("Invalid file descriptor: {}", fd))
+        }
+    }
+
+    pub fn ioctl(&self, fd: usize, request: u64, arg: u64) -> Result<u64, String> {
+        if let Some(mut open_file) = self.open_files.get(fd) {
+            let mut open_file_lock = open_file.lock();
+            open_file_lock.inode.lock().ioctl(request, arg)
+        } else {
+            Err(format!("Invalid file descriptor: {}", fd))
+        }
+    }
+
+    pub fn get_file(&self, fd: u64) -> Option<Arc<Mutex<dyn Inode>>> {
+        self.open_files
+            .get(fd as usize)
+            .map(|open_file| open_file.lock().inode.clone())
+    }
+
+    pub fn dealloc(&mut self) {
+        let phys_offset = self.pml4_table.phys_offset.as_u64();
+        for vma in self.vmas.iter() {
+            for va in (vma.start..vma.end).step_by(4096) {
+                unsafe {
+                    let mut kernel_paging_manager_lock = KERNEL_PAGING_MANAGER.lock();
+                    let frame_allocator =
+                        &mut kernel_paging_manager_lock.as_mut().unwrap().frame_allocator;
+                    self.pml4_table.with_mapper(|mapper| {
+                        let exist = mapper.translate_addr(VirtAddr::new(va)).is_some();
+                        if exist {
+                            let frame = PhysFrame::containing_address(PhysAddr::new(va));
+                            frame_allocator.deallocate_frame(frame);
+                        }
+                    });
+                }
+            }
+        }
+
         self.pml4_table.dealloc();
-        self.state = ProcessState::Terminated;
     }
-}
-unsafe fn jump_to_user(rip: VirtAddr, rsp: VirtAddr) -> ! {
-    const USER_CODE_SEGMENT: u64 = 0x20 | 3; // Segment 4, RPL 3
-    const USER_DATA_SEGMENT: u64 = 0x18 | 3; // Segment 3, RPL 3
-    const RFLAGS_IF: u64 = 0x202;
 
-    unsafe {
-        core::arch::asm!(
-            // Pousser le frame iretq avec des registres fixes
-            "push {ds}",       // ss
-            "push r10",        // rsp user
-            "push {rflags}",   // rflags
-            "push {cs}",       // cs
-            "push r11",        // rip
-            // Changer les segments après (ax est libre)
-            "mov ax, {ds}",
-            "mov ds, ax",
-            "mov es, ax",
-            "mov fs, ax",
-            "mov gs, ax",
-            "iretq",
-            ds     = const USER_DATA_SEGMENT,
-            cs     = const USER_CODE_SEGMENT,
-            rflags = const RFLAGS_IF,
-            in("r10") rsp.as_u64(),
-            in("r11") rip.as_u64(),
-            options(noreturn)
-        );
+    pub fn find_free_vma_space(&self, len: u64, base: u64) -> Option<VirtAddr> {
+        const PAGE_SIZE: u64 = 4096;
+
+        let mut candidate = align_up(base, PAGE_SIZE);
+
+        let mut vmas = self.vmas.clone();
+        vmas.sort_by_key(|v| v.start);
+
+        for vma in vmas {
+            let start = vma.start as u64;
+            let end = vma.end as u64;
+
+            if let Some(end_candidate) = candidate.checked_add(len) {
+                if end_candidate <= start {
+                    return Some(VirtAddr::new(candidate));
+                }
+            } else {
+                return None;
+            }
+
+            candidate = align_up(end, PAGE_SIZE);
+        }
+
+        candidate.checked_add(len)?;
+        Some(VirtAddr::new(candidate))
     }
 }
 
-pub fn spawn(pid: Pid, rip: VirtAddr) -> Option<usize> {
-    let mut processus_lock = PROCESSES.lock();
-    let process = processus_lock.get_mut(&pid)?;
-    Some(process.spawn_user_thread(rip))
-}
-
-/*
-pub fn fork(ctx: &SyscallCtx) -> Option<Pid> {
-    let child = SCHEDULER.lock().current_task()?.clone();
-    let mut processes_lock = PROCESSES.lock();
-    let parent_process = processes_lock.iter().find(|p| p.pid == child.parent)?;
-
-    let mut new_pml4_table = ProcessPageTable::copy_from(&parent_process.pml4_table);
-
-    let mut new_process = Process::new(new_pml4_table);
-    println!("RIP fork: {:?}", ctx.rip);
-    let task_id = new_process.add_to_scheduler(VirtAddr::new(ctx.rip), VirtAddr::new(ctx.rsp));
-    SCHEDULER.lock().tasks[task_id].context.r9 = 0;
-
-    let child_pid = new_process.pid;
-    processes_lock.push(new_process);
-    Some(child_pid)
-}*/
 pub fn fork(task_id: usize, sysctx: *mut SyscallCtx) -> Option<Pid> {
     let task = SCHEDULER.lock().tasks.get(&task_id)?.clone();
     let sysctx = unsafe { sysctx.as_ref().unwrap() };
-    println_serial!("fork: child rip={:#x} rsp={:#x}", sysctx.rip, sysctx.rsp); // ← ici
 
     let pid = task.parent;
 
     let process = PROCESSES.lock().get(&pid).cloned().unwrap();
 
-    let new_pid = Process::create(ProcessPageTable::copy_from(process.pml4_table));
-    let new_process = PROCESSES.lock().get(&new_pid).cloned().unwrap();
-
+    let new_pid = Process::create(
+        ProcessPageTable::copy_from(process.pml4_table),
+        &process.vmas,
+        None,
+        process.current_session,
+        process.brk_start,
+    );
+    let mut processes_lock = PROCESSES.lock();
+    let new_process = processes_lock.get_mut(&new_pid).unwrap();
+    new_process.open_files = process.open_files.clone();
+    new_process.brk = process.brk;
     let mut new_task = Task::new_user(
         0,
         new_pid,
@@ -266,6 +373,7 @@ pub fn fork(task_id: usize, sysctx: *mut SyscallCtx) -> Option<Pid> {
         sysctx.rsp,
         new_process.pml4_table.pml4_frame.start_address().as_u64(),
         KERNEL_STACK_SIZE,
+        None,
     );
 
     new_task.context.r15 = sysctx.r15;
@@ -273,19 +381,63 @@ pub fn fork(task_id: usize, sysctx: *mut SyscallCtx) -> Option<Pid> {
     new_task.context.r13 = sysctx.r13;
     new_task.context.r12 = sysctx.r12;
     new_task.context.r10 = sysctx.r10;
-    new_task.context.r9 = sysctx.r9;
+    new_task.context.r9 = 0;
     new_task.context.r8 = sysctx.r8;
     new_task.context.rbx = sysctx.rbx;
     new_task.context.rbp = sysctx.rbp;
-    new_task.context.rax = 0; // ← child retourne 0, pas r9
+    new_task.context.rax = 0;
+
+    println!("NEW TASK FORKED {:?}", new_task);
 
     SCHEDULER.lock().add_task(new_task);
     Some(new_pid)
 }
-fn test_function() -> ! {
-    println_serial!("Hello from the child(test function) process!");
-    loop {}
+
+pub fn execve(path: &str, process_argument: ProcessArguments) -> Result<(), String> {
+    let path = GLOBAL_CONTEXT
+        .fs
+        .lock()
+        .lookup(path)
+        .map_err(|e| format!("execve: failed to lookup {}: {}", path, e))?;
+
+    let size = path.lock().size() as usize;
+    let mut buf = alloc::vec![0u8; size];
+    path.lock()
+        .read_at(0, &mut buf)
+        .map_err(|e| format!("execve: failed to read file {}: {}", size, e))?;
+    let mut elf = ElfProcess::new(&buf);
+    let entry_point = elf
+        .load()
+        .ok_or_else(|| "execve: failed to load ELF".to_string())?;
+    let vmas = elf.get_vmas();
+    let pml4_table = elf.get_page_table();
+    let mut scheduler_lock = SCHEDULER.lock();
+    let mut processes_lock = PROCESSES.lock();
+    let current_task = scheduler_lock
+        .current_task()
+        .ok_or_else(|| "execve: no current task".to_string())?;
+    let pid = current_task.parent;
+    let process = processes_lock
+        .get_mut(&pid)
+        .ok_or_else(|| "execve: current task's parent process not found".to_string())?;
+
+    for taskid in process.tasks.iter() {
+        scheduler_lock.exit_task(*taskid, 137); // 137 = SIGKILL
+    }
+    drop(scheduler_lock);
+    process.dealloc();
+
+    process.arguments = Some(process_argument);
+    process.pml4_table = *pml4_table;
+    process.vmas = vmas.clone();
+    process.brk_start = elf.get_brk_start();
+    process.brk = process.brk_start;
+    process.tasks.clear();
+
+    process.spawn_user_thread(entry_point);
+    Ok(())
 }
+
 pub fn wait(pid: Pid) {
     loop {
         let mut processes_lock = PROCESSES.lock();
@@ -313,4 +465,67 @@ pub fn wait_all() {
         drop(processes_lock);
         yield_now();
     }
+}
+
+pub fn pipe() -> Result<(usize, usize), String> {
+    let (reader, writer) = Pipe::new();
+    let mut scheduler_lock = SCHEDULER.lock();
+    let current_task = scheduler_lock
+        .current_task()
+        .expect("No current task in pipe");
+    let mut processes_lock = PROCESSES.lock();
+    let process = processes_lock
+        .get_mut(&current_task.parent)
+        .expect("Current task's parent process not found in pipe");
+
+    let reader_fd = process.open_inode(reader, OpenFlags::READ)?;
+    let writer_fd = process.open_inode(writer, OpenFlags::WRITE)?;
+
+    Ok((reader_fd, writer_fd))
+}
+
+pub fn current_process() -> Option<Process> {
+    let scheduler = SCHEDULER.lock();
+    let current_task = scheduler.current_task()?;
+    let processes_lock = PROCESSES.lock();
+    processes_lock.get(&current_task.parent).cloned()
+}
+
+pub fn spawn(pid: Pid, rip: VirtAddr) -> Option<usize> {
+    let mut processus_lock = PROCESSES.lock();
+    let process = processus_lock.get_mut(&pid)?;
+    Some(process.spawn_user_thread(rip))
+}
+
+pub fn get_exit_code(pid: Pid) -> Option<u8> {
+    let processes_lock = PROCESSES.lock();
+    processes_lock.get(&pid)?.exit_code
+}
+
+pub fn brk(process: &mut Process, addr: u64) -> Result<u64, String> {
+    if addr == 0 {
+        return Ok(process.brk);
+    }
+
+    if addr < process.brk_start {
+        return Ok(process.brk);
+    }
+
+    if addr > process.brk {
+        process.vmas.push(VMA {
+            start: process.brk,
+            end: addr,
+            flags: MapFlags::PRIVATE | MapFlags::ANONYMOUS,
+            prot: ProtFlags::READ | ProtFlags::WRITE,
+            file: None,
+            offset: 0,
+            phys_addr: None,
+        });
+    } else {
+        let aligned_addr = align_up(addr, 4096);
+        mmap::munmap(process, addr, process.brk - aligned_addr)?;
+    }
+
+    process.brk = addr;
+    Ok(addr)
 }

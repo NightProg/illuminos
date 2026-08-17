@@ -1,6 +1,6 @@
 use core::{
     alloc::{GlobalAlloc, Layout},
-    sync::atomic::AtomicU64,
+    sync::atomic::{AtomicBool, AtomicU64},
 };
 
 use core::mem;
@@ -17,6 +17,8 @@ use x86_64::{
 use crate::println;
 
 use super::paging::{PagingManager, map_page};
+
+pub static HEAP_READY: AtomicBool = AtomicBool::new(false);
 
 pub const KERNEL_HEAP_START: VirtAddr = VirtAddr::new(0xFFFF_C000_0000_0000); // PML4[384] → libre
 pub const KERNEL_HEAP_SIZE: u64 = 1024 * 1024 * 100; // 500 Mo
@@ -53,6 +55,7 @@ pub fn init_kernel_heap(paging_manager: &mut PagingManager) {
         KERNEL_HEAP_SIZE,
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
     );
+    HEAP_READY.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn init_user_heap(paging_manager: &mut PagingManager) {

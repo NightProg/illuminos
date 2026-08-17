@@ -1,7 +1,9 @@
 // memory/process_paging.rs
 
 use super::paging::{PagingManager, map_page};
-use crate::allocator::paging::{KERNEL_CR3, KERNEL_CR3_FRAME, KERNEL_PAGING_MANAGER};
+use crate::allocator::paging::{
+    KERNEL_CR3, KERNEL_CR3_FRAME, KERNEL_PAGING_MANAGER, frame_dec_refcount, frame_inc_refcount,
+};
 use crate::println_serial;
 use x86_64::structures::paging::{FrameDeallocator, Mapper};
 use x86_64::{
@@ -12,10 +14,12 @@ use x86_64::{
     },
 };
 
+pub const COW_FLAG: PageTableFlags = PageTableFlags::BIT_10;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessPageTable {
     pub pml4_frame: PhysFrame,
-    phys_offset: VirtAddr,
+    pub phys_offset: VirtAddr,
 }
 
 impl ProcessPageTable {
@@ -37,117 +41,103 @@ impl ProcessPageTable {
     }
 
     pub fn copy_from(other: ProcessPageTable) -> Self {
-        let mut paging_manager_lock = KERNEL_PAGING_MANAGER.lock();
-        let mut paging_manager = paging_manager_lock
-            .as_mut()
-            .expect("KERNEL_PAGING_MANAGER not initialized before creating ProcessPageTable");
-        let phys_offset = paging_manager.mapper.phys_offset();
+        let mut pm = KERNEL_PAGING_MANAGER.lock();
+        let pm = pm.as_mut().unwrap();
+        let phys_offset = pm.mapper.phys_offset();
 
-        let pml4_frame = paging_manager.allocate_frame().expect("no more frame ");
-
-        let pml4_virt = phys_offset + pml4_frame.start_address().as_u64();
-        let new_pml4: &mut PageTable = unsafe { &mut *(pml4_virt.as_mut_ptr()) };
-
+        let pml4_frame = pm.allocate_frame().expect("no frame for PML4");
+        let new_pml4: &mut PageTable =
+            unsafe { &mut *((phys_offset + pml4_frame.start_address().as_u64()).as_mut_ptr()) };
         new_pml4.zero();
 
-        let other_pml4_virt = phys_offset + other.pml4_frame.start_address().as_u64();
-        let other_pml4: &PageTable = unsafe { &*(other_pml4_virt.as_ptr()) };
+        let other_pml4: &mut PageTable = unsafe {
+            &mut *((phys_offset + other.pml4_frame.start_address().as_u64()).as_mut_ptr())
+        };
 
         for i in 0..512 {
             if other_pml4[i].is_unused() {
                 continue;
             }
-            if other_pml4[i].flags().contains(PageTableFlags::HUGE_PAGE) {
-                println_serial!("Skipping huge page in PML4[{}]", i);
-                continue;
-            }
-            if KERNEL_CR3.lock().clone().unwrap()[i]
-                .flags()
-                .contains(PageTableFlags::PRESENT)
-            {
+            if i >= 256 {
                 new_pml4[i] = other_pml4[i].clone();
-                continue;
-            }
+            } else {
+                let new_pdpt_frame = pm.allocate_frame().expect("no frame for PDPT");
+                frame_inc_refcount(&new_pdpt_frame);
+                let new_pdpt: &mut PageTable = unsafe {
+                    &mut *((phys_offset + new_pdpt_frame.start_address().as_u64()).as_mut_ptr())
+                };
+                new_pdpt.zero();
 
-            let pdpt_phys = other_pml4[i].addr().as_u64();
-            let other_pdpt: &PageTable = unsafe { &*((phys_offset + pdpt_phys).as_ptr()) };
-            let new_pdpt_frame = paging_manager.allocate_frame().expect("no more frame");
-            let new_pdpt_virt = phys_offset + new_pdpt_frame.start_address().as_u64();
-            let new_pdpt: &mut PageTable = unsafe { &mut *(new_pdpt_virt.as_mut_ptr()) };
-            new_pdpt.zero();
-            for j in 0..512 {
-                if other_pdpt[j].is_unused() {
-                    continue;
-                }
-                if other_pdpt[j].flags().contains(PageTableFlags::HUGE_PAGE) {
-                    println_serial!("Skipping huge page in PDPT[{}]", j);
-                    continue;
-                }
+                let other_pdpt: &mut PageTable =
+                    unsafe { &mut *((phys_offset + other_pml4[i].addr().as_u64()).as_mut_ptr()) };
 
-                let pd_phys = other_pdpt[j].addr().as_u64();
-                let other_pd: &PageTable = unsafe { &*((phys_offset + pd_phys).as_ptr()) };
-                let new_pd_frame = paging_manager.allocate_frame().expect("no more frame");
-                let new_pd_virt = phys_offset + new_pd_frame.start_address().as_u64();
-                let new_pd: &mut PageTable = unsafe { &mut *(new_pd_virt.as_mut_ptr()) };
-                new_pd.zero();
-                for k in 0..512 {
-                    if other_pd[k].is_unused() {
+                for j in 0..512 {
+                    if other_pdpt[j].is_unused() {
                         continue;
                     }
-                    if other_pd[k].flags().contains(PageTableFlags::HUGE_PAGE) {
-                        println_serial!("Skipping huge page in PD[{}]", k);
-                        continue;
-                    }
+                    let new_pd_frame = pm.allocate_frame().expect("no frame for PD");
+                    frame_inc_refcount(&new_pd_frame);
+                    let new_pd: &mut PageTable = unsafe {
+                        &mut *((phys_offset + new_pd_frame.start_address().as_u64()).as_mut_ptr())
+                    };
+                    new_pd.zero();
 
-                    let pt_phys = other_pd[k].addr().as_u64();
-                    let other_pt: &PageTable = unsafe { &*((phys_offset + pt_phys).as_ptr()) };
-                    let new_pt_frame = paging_manager.allocate_frame().expect("no more frame");
-                    let new_pt_virt = phys_offset + new_pt_frame.start_address().as_u64();
-                    let new_pt: &mut PageTable = unsafe { &mut *(new_pt_virt.as_mut_ptr()) };
-                    new_pt.zero();
-                    for l in 0..512 {
-                        if other_pt[l].is_unused() {
+                    let other_pd: &mut PageTable = unsafe {
+                        &mut *((phys_offset + other_pdpt[j].addr().as_u64()).as_mut_ptr())
+                    };
+
+                    for k in 0..512 {
+                        if other_pd[k].is_unused() {
+                            continue;
+                        }
+                        if other_pd[k].flags().contains(PageTableFlags::HUGE_PAGE) {
+                            let mut flags = other_pd[k].flags() & !PageTableFlags::WRITABLE;
+                            new_pd[k].set_addr(other_pd[k].addr(), flags);
+                            other_pd[k].set_flags(flags); // parent aussi read-only !
                             continue;
                         }
 
-                        let src_phys = other_pt[l].addr().as_u64();
-                        let flags = other_pt[l].flags();
-
-                        // allouer un nouveau frame pour la copie
-                        let new_data_frame =
-                            paging_manager.allocate_frame().expect("no more frame");
-                        let new_data_virt = phys_offset + new_data_frame.start_address().as_u64();
-
-                        let src = unsafe {
-                            core::slice::from_raw_parts(
-                                (phys_offset + src_phys).as_ptr::<u8>(),
-                                4096,
-                            )
+                        let new_pt_frame = pm.allocate_frame().expect("no frame for PT");
+                        let new_pt: &mut PageTable = unsafe {
+                            &mut *((phys_offset + new_pt_frame.start_address().as_u64())
+                                .as_mut_ptr())
                         };
-                        let dst = unsafe {
-                            core::slice::from_raw_parts_mut(new_data_virt.as_mut_ptr::<u8>(), 4096)
-                        };
-                        dst.copy_from_slice(src);
+                        new_pt.zero();
 
-                        // pointer vers le nouveau frame
-                        new_pt[l].set_addr(new_data_frame.start_address(), flags);
+                        let other_pt: &mut PageTable = unsafe {
+                            &mut *((phys_offset + other_pd[k].addr().as_u64()).as_mut_ptr())
+                        };
+
+                        for l in 0..512 {
+                            if other_pt[l].is_unused() {
+                                continue;
+                            }
+                            let cow_flags =
+                                other_pt[l].flags() & !PageTableFlags::WRITABLE | COW_FLAG;
+                            new_pt[l].set_addr(other_pt[l].addr(), cow_flags);
+                            other_pt[l].set_flags(cow_flags);
+                        }
+
+                        let pd_flags = other_pd[k].flags() & !PageTableFlags::WRITABLE;
+                        new_pd[k].set_addr(new_pt_frame.start_address(), pd_flags);
                     }
-                    let flags = other_pd[k].flags();
-                    new_pd[k].set_addr(new_pt_frame.start_address(), flags);
+
+                    let pdpt_flags = other_pdpt[j].flags() & !PageTableFlags::WRITABLE;
+                    new_pdpt[j].set_addr(new_pd_frame.start_address(), pdpt_flags);
                 }
-                let flags = other_pdpt[j].flags();
-                new_pdpt[j].set_addr(new_pd_frame.start_address(), flags);
+
+                let pml4_flags = other_pml4[i].flags() & !PageTableFlags::WRITABLE;
+                new_pml4[i].set_addr(new_pdpt_frame.start_address(), pml4_flags);
             }
-            let flags = other_pml4[i].flags();
-            new_pml4[i].set_addr(new_pdpt_frame.start_address(), flags);
         }
+
+        unsafe { x86_64::instructions::tlb::flush_all() };
 
         Self {
             pml4_frame,
             phys_offset,
         }
     }
-
     pub fn new() -> Self {
         let mut paging_manager_lock = KERNEL_PAGING_MANAGER.lock();
         let mut paging_manager = paging_manager_lock
@@ -169,7 +159,7 @@ impl ProcessPageTable {
         let kernel_pml4_virt = phys_offset + kernel_pml4_frame.start_address().as_u64();
         let kernel_pml4: &PageTable = unsafe { &*(kernel_pml4_virt.as_ptr()) };
 
-        for i in 0..512 {
+        for i in 256..512 {
             if !kernel_pml4[i].is_unused() {
                 println_serial!(
                     "Copying kernel PML4 entry {}: {:#x}",
@@ -180,38 +170,13 @@ impl ProcessPageTable {
             new_pml4[i] = kernel_pml4[i].clone();
         }
 
-        if !kernel_pml4[0].is_unused() {
-            let pdpt_frame = paging_manager
-                .frame_allocator
-                .allocate_frame()
-                .expect("no more frame");
-            let pdpt_virt = phys_offset + pdpt_frame.start_address().as_u64();
-            let new_pdpt: &mut PageTable = unsafe { &mut *(pdpt_virt.as_mut_ptr()) };
-            new_pdpt.zero();
-
-            let kernel_pdpt_phys = kernel_pml4[0].addr();
-            let kernel_pdpt_virt = phys_offset + kernel_pdpt_phys.as_u64();
-            let kernel_pdpt: &PageTable = unsafe { &*(kernel_pdpt_virt.as_ptr()) };
-
-            for i in 0..512 {
-                new_pdpt[i] = kernel_pdpt[i].clone();
-            }
-
-            new_pdpt[0].set_unused();
-
-            let flags = kernel_pml4[0].flags();
-            new_pml4[0].set_addr(pdpt_frame.start_address(), flags);
-        }
-
-        new_pml4[255].set_unused();
-
         Self {
             pml4_frame,
             phys_offset,
         }
     }
 
-    unsafe fn with_mapper<F, R>(&mut self, f: F) -> R
+    pub unsafe fn with_mapper<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut OffsetPageTable) -> R,
     {
@@ -334,7 +299,12 @@ impl ProcessPageTable {
                         if pt[l].is_unused() {
                             continue;
                         }
-                        paging.deallocate_frame(PhysFrame::containing_address(pt[l].addr()));
+                        let frame = PhysFrame::containing_address(pt[l].addr());
+
+                        let rc = frame_dec_refcount(&frame);
+                        if rc == 0 {
+                            paging.deallocate_frame(PhysFrame::containing_address(pt[l].addr()));
+                        }
                     }
 
                     paging.deallocate_frame(PhysFrame::containing_address(PhysAddr::new(pt_phys)));

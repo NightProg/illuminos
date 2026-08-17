@@ -1,20 +1,32 @@
 pub mod process;
 pub mod signal;
+pub mod sleeper;
 
 use crate::allocator::process_paging::ProcessPageTable;
-use crate::thread::process::{PROCESSES, Pid};
+use crate::sync::mutex::{Mutex, TimeoutMutex};
+use crate::sync::ring_buffer::AtomicRingBuffer;
+use crate::thread::process::{PROCESSES, Pid, ProcessArguments};
 use crate::thread::signal::{Signal, SignalState};
-use crate::{dbg, println};
+use crate::{dbg, println, println_serial};
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::global_asm;
-use spin::Mutex;
+use core::sync::atomic::Ordering;
+use core::time::Duration;
+use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::PhysFrame;
 use x86_64::{PhysAddr, VirtAddr};
+use crate::idt::TICKS;
+use crate::thread::sleeper::SLEEPER_QUEUE;
 
-pub static PENDING_FREE: Mutex<Vec<ProcessPageTable>> = Mutex::new(Vec::new());
+#[unsafe(no_mangle)]
+pub static mut CURRENT_KERNEL_STACK: u64 = 0;
+
+pub static PENDING_FREE: spin::Mutex<Vec<ProcessPageTable>> = spin::Mutex::new(Vec::new());
 pub const MAX_TASKS: usize = 64;
-pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler {
+pub static SCHEDULER: TimeoutMutex<Scheduler> = TimeoutMutex::new(Scheduler {
     tasks: BTreeMap::new(),
     current: 0,
     is_ready: false,
@@ -72,11 +84,74 @@ pub struct Task {
     pub context: TaskContext,
     kernel_stack: VirtAddr,
     kernel_stack_top: VirtAddr,
-    state: TaskState,
+    fsgsbase: Option<u64>,
+    pub state: TaskState,
     cr3: Option<u64>,
 }
 
 impl Task {
+    fn setup_user_stack(
+        stack_top: u64,
+        process_argument: Option<ProcessArguments>,
+        pml4_phys: PhysFrame,
+    ) -> u64 {
+        let mut sp = stack_top;
+
+        if let Some(args) = process_argument {
+            let (old_pt, old_flag) = unsafe { Cr3::read() };
+            unsafe {
+                Cr3::write(
+                    PhysFrame::containing_address(PhysAddr::new(
+                        pml4_phys.start_address().as_u64(),
+                    )),
+                    old_flag,
+                );
+            }
+            unsafe fn push_str(sp: &mut u64, s: &str) -> u64 {
+                *sp -= s.len() as u64 + 1;
+                core::ptr::copy_nonoverlapping(s.as_ptr(), *sp as *mut u8, s.len());
+                *(*sp as *mut u8).add(s.len()) = 0;
+                *sp
+            }
+
+            unsafe fn push_u64(sp: &mut u64, val: u64) {
+                *sp -= 8;
+                *(*sp as *mut u64) = val;
+            }
+
+            let mut arg_ptrs = Vec::new();
+            let mut env_ptrs = Vec::new();
+            unsafe {
+                // strings
+                for arg in args.argv.iter() {
+                    arg_ptrs.push(push_str(&mut sp, &arg));
+                }
+                for env in args.envp {
+                    env_ptrs.push(push_str(&mut sp, &env));
+                }
+
+                sp &= !0xf;
+
+                push_u64(&mut sp, 0);
+                for ptr in env_ptrs.iter().rev() {
+                    push_u64(&mut sp, *ptr);
+                }
+
+                push_u64(&mut sp, 0);
+                for ptr in arg_ptrs.iter().rev() {
+                    push_u64(&mut sp, *ptr);
+                }
+
+                push_u64(&mut sp, args.argv.len() as u64);
+            }
+
+            unsafe {
+                Cr3::write(old_pt, old_flag);
+            }
+        }
+
+        sp
+    }
     pub fn new_user_with_kstack(
         id: usize,
         parent: Pid,
@@ -85,10 +160,17 @@ impl Task {
         pml4_phys: u64,
         kernel_stack: VirtAddr,
         kernel_stack_size: usize,
+        process_argument: Option<ProcessArguments>,
+        fsgsbase: Option<u64>
     ) -> Self {
         let kernel_stack_top = kernel_stack + kernel_stack_size as u64;
 
         let mut sp = kernel_stack_top.as_u64();
+        let user_rsp = Self::setup_user_stack(
+            user_rsp,
+            process_argument,
+            PhysFrame::containing_address(PhysAddr::new(pml4_phys)),
+        );
 
         unsafe fn push(sp: &mut u64, val: u64) {
             *sp -= 8;
@@ -126,6 +208,7 @@ impl Task {
             state: TaskState::Ready,
             cr3: Some(pml4_phys),
             signals: SignalState::default(),
+            fsgsbase
         }
     }
     pub fn new_user(
@@ -135,6 +218,9 @@ impl Task {
         user_rsp: u64,
         pml4_phys: u64,
         kernel_stack_size: usize,
+        process_argument: Option<ProcessArguments>,
+        fsgsbase: Option<u64>
+        
     ) -> Self {
         let kernel_stack = unsafe {
             let layout =
@@ -150,6 +236,8 @@ impl Task {
             pml4_phys,
             kernel_stack,
             kernel_stack_size,
+            process_argument,
+            fsgsbase
         )
     }
 
@@ -165,7 +253,7 @@ impl Task {
 
         stack_top -= 8u64;
         unsafe {
-            *(stack_top.as_mut_ptr::<u64>()) = task_exit as u64;
+            *(stack_top.as_mut_ptr::<u64>()) = exit as u64;
         }
 
         let context = TaskContext {
@@ -182,6 +270,7 @@ impl Task {
             cr3: None,
             kernel_stack_top: stack_top,
             signals: SignalState::default(),
+            fsgsbase: None,
         }
     }
 
@@ -195,7 +284,7 @@ pub enum TaskState {
     Ready,
     Running,
     Blocked,
-    Zombie,
+    Zombie(u8),
 }
 
 pub struct Scheduler {
@@ -203,7 +292,7 @@ pub struct Scheduler {
     pub current: usize,
     pub is_ready: bool,
     pub is_running: bool,
-    pub exit_callbacks: Vec<(usize, Box<dyn FnOnce() + Send>)>,
+    pub exit_callbacks: Vec<(usize, Box<dyn FnOnce() + Send + Sync>)>,
 }
 
 impl Scheduler {
@@ -227,6 +316,12 @@ impl Scheduler {
         TaskState::Ready
     }
 
+    pub fn current_is_ready_to_schedule(&self) -> Option<bool> {
+        let state = self.current_task()?.state;
+
+        Some(state == TaskState::Ready || state == TaskState::Running)
+    }
+
     pub fn add_user_task(
         &mut self,
         entry: u64,
@@ -234,6 +329,7 @@ impl Scheduler {
         pml4_phys: u64,
         kernel_stack_size: usize,
         parent_pid: Pid,
+        process_argument: Option<ProcessArguments>,
     ) -> TaskId {
         let id = self.tasks.len();
         let task = Task::new_user(
@@ -243,9 +339,24 @@ impl Scheduler {
             user_rsp,
             pml4_phys,
             kernel_stack_size,
+            process_argument,
         );
         self.tasks.insert(id, task);
         id
+    }
+
+    pub fn wake_task(&mut self, id: TaskId) {
+        if let Some(task) = self.tasks.get_mut(&id) {
+            if matches!(task.state, TaskState::Blocked) {
+                task.state = TaskState::Ready;
+            }
+        }
+    }
+
+    pub fn wake_tasks<const N: usize>(&mut self, ids: &AtomicRingBuffer<TaskId, N>) {
+        for id in (ids.pop_n(N)) {
+            self.wake_task(id);
+        }
     }
 
     pub fn current_task(&self) -> Option<&Task> {
@@ -280,10 +391,10 @@ impl Scheduler {
         }
     }
 
-    pub fn exit_current_task(&mut self) {
+    pub fn exit_current_task(&mut self, status_code: u8) {
         if !self.tasks.is_empty() {
             let current = self.current;
-            self.current_task_mut().unwrap().state = TaskState::Zombie;
+            self.current_task_mut().unwrap().state = TaskState::Zombie(status_code);
 
             let mut i = 0;
             while i < self.exit_callbacks.len() {
@@ -297,14 +408,30 @@ impl Scheduler {
         }
     }
 
-    pub fn register_exit_callback(&mut self, wait_for_id: TaskId, cb: Box<dyn FnOnce() + Send>) {
+    pub fn register_exit_callback(
+        &mut self,
+        wait_for_id: TaskId,
+        cb: Box<dyn FnOnce() + Send + Sync>,
+    ) {
         if let Some(task) = self.tasks.get(&wait_for_id) {
-            if matches!(task.state, TaskState::Zombie) {
+            if matches!(task.state, TaskState::Zombie(_)) {
                 cb();
                 return;
             }
         }
         self.exit_callbacks.push((wait_for_id, cb));
+    }
+
+    pub fn exit_task(&mut self, id: TaskId, status_code: u8) {
+        if let Some(task) = self.tasks.get_mut(&id) {
+            task.state = TaskState::Zombie(status_code);
+        }
+    }
+
+    pub fn block_current_task(&mut self) {
+        if !self.tasks.is_empty() {
+            self.current_task_mut().unwrap().state = TaskState::Blocked;
+        }
     }
 
     pub fn ready(&mut self) {
@@ -320,7 +447,7 @@ where
         {
             let scheduler = SCHEDULER.lock();
             if let Some(task) = scheduler.tasks.get(&id) {
-                if matches!(task.state, TaskState::Zombie) {
+                if matches!(task.state, TaskState::Zombie(_)) {
                     break;
                 }
             } else {
@@ -341,7 +468,7 @@ where
         {
             let scheduler = SCHEDULER.lock();
             if let Some(task) = scheduler.tasks.get(&id) {
-                if matches!(task.state, TaskState::Zombie) {
+                if matches!(task.state, TaskState::Zombie(_)) {
                     break;
                 }
             } else {
@@ -370,7 +497,7 @@ pub fn schedule() {
         let mut first_run = false;
 
         {
-            let mut scheduler = SCHEDULER.lock();
+            let mut scheduler = SCHEDULER.try_lock().unwrap();
 
             if !scheduler.is_ready() {
                 if interrupts_enabled {
@@ -395,10 +522,7 @@ pub fn schedule() {
                 }
             } else if scheduler.tasks.len() > 1 {
                 let prev = scheduler.current;
-                if !matches!(
-                    scheduler.tasks.get_mut(&prev).unwrap().state,
-                    TaskState::Zombie
-                ) {
+                if scheduler.current_is_ready_to_schedule().unwrap() {
                     scheduler.tasks.get_mut(&prev).unwrap().state = TaskState::Ready;
                 }
                 let found = scheduler.next_task();
@@ -416,12 +540,15 @@ pub fn schedule() {
                     &scheduler.tasks.get_mut(&next).unwrap().context as *const TaskContext;
 
                 crate::gdt::set_tss_rsp0(next_stack_top);
+                unsafe {
+                    CURRENT_KERNEL_STACK = next_stack_top.as_u64();
+                }
 
                 if let Some(cr3) = next_cr3 {
                     unsafe {
-                        x86_64::registers::control::Cr3::write(
-                            x86_64::structures::paging::PhysFrame::containing_address(
-                                x86_64::PhysAddr::new(cr3),
+                        Cr3::write(
+                            PhysFrame::containing_address(
+                                PhysAddr::new(cr3),
                             ),
                             x86_64::registers::control::Cr3Flags::empty(),
                         );
@@ -440,18 +567,21 @@ pub fn schedule() {
                 context: TaskContext::default(),
             };
             let next_cr3 = {
-                let scheduler = SCHEDULER.lock();
+                let scheduler = SCHEDULER.try_lock().unwrap();
                 let t = scheduler.current_task().unwrap();
                 (t.cr3, t.kernel_stack_top)
             };
 
             if let Some(cr3) = next_cr3.0 {
                 crate::gdt::set_tss_rsp0(next_cr3.1);
+                unsafe {
+                    CURRENT_KERNEL_STACK = next_cr3.1.as_u64();
+                }
 
                 unsafe {
-                    x86_64::registers::control::Cr3::write(
-                        x86_64::structures::paging::PhysFrame::containing_address(
-                            x86_64::PhysAddr::new(cr3),
+                    Cr3::write(
+                        PhysFrame::containing_address(
+                            PhysAddr::new(cr3),
                         ),
                         x86_64::registers::control::Cr3Flags::empty(),
                     );
@@ -472,43 +602,63 @@ pub extern "C" fn yield_now() {
     schedule();
 }
 
-pub extern "C" fn exit() {
-    task_exit();
+pub fn exit_group(status_code: u8) {
+    let mut scheduler = SCHEDULER.lock();
+    let current_id = scheduler.current;
+    let parent_id = scheduler.tasks.get(&current_id).unwrap().parent;
+
+    for (id, task) in scheduler.tasks.clone() {
+        if task.parent == parent_id {
+            scheduler.exit_task(id, status_code);
+        }
+    }
 }
-pub extern "C" fn task_exit() {
+
+pub fn sleep(duration: Duration)  -> Result<(), String> {
+    let current_tick = TICKS.load(Ordering::SeqCst);
+    if duration.as_nanos() > u64::MAX as u128 {
+        return Err("Duration too long".to_string())
+    }
+
+    let ms = duration.as_millis() as u64;
+    let current_task_id = SCHEDULER.lock().current;
+
+    SLEEPER_QUEUE.lock().add(current_task_id, ms + current_tick);
+
+    SCHEDULER.lock().block_current_task();
+    schedule();
+    Ok(())
+}
+
+pub extern "C" fn exit(status_code: u8) {
+    println!("Exiting thread with status code: {}", status_code);
     let interrupts_enabled = x86_64::instructions::interrupts::are_enabled();
     if interrupts_enabled {
         x86_64::instructions::interrupts::disable();
     }
 
+    unsafe {
+        SCHEDULER.lock().exit_current_task(status_code);
+    }
+
+    println!("(2) Exiting thread with status code: {}", status_code);
     {
         let mut procs = PROCESSES.lock();
+        dbg!();
         let task_id = SCHEDULER.lock().current;
-        let stack_top = SCHEDULER
-            .lock()
-            .tasks
-            .get(&task_id)
-            .map(|t| t.kernel_stack_top)
-            .unwrap();
-
-        crate::println_serial!(
-            "task_exit: task={} kernel_stack_top={:#x?}",
-            task_id,
-            stack_top
-        );
-
+        dbg!();
         if let Some((_, proc)) = procs.iter_mut().find(|p| p.1.tasks.contains(&task_id)) {
             if proc.is_terminated_in_scheduler() {
-                PENDING_FREE.lock().push(proc.pml4_table);
-                proc.state = process::ProcessState::Terminated;
+                for cb in proc.exit_callbacks.drain(..) {
+                    cb();
+                    
+                }
+                proc.exit_code = Some(status_code);
+                //proc.dealloc();
             }
         }
     }
-
-    unsafe {
-        SCHEDULER.lock().exit_current_task();
-    }
-    println!("QUITTING TASK");
+    println!("SCHEDULING");
     schedule();
 
     loop {
@@ -521,7 +671,7 @@ unsafe extern "C" fn iretq_trampoline() -> ! {
     core::arch::naked_asm!("xor rax, rax", "xor r9, r9", "iretq",);
 }
 
-pub extern "C" fn gc_task() {
+/*pub extern "C" fn gc_task() {
     loop {
         let to_free: Vec<ProcessPageTable> = PENDING_FREE.lock().drain(..).collect();
         for mut pt in to_free {
@@ -533,4 +683,4 @@ pub extern "C" fn gc_task() {
         }
         yield_now();
     }
-}
+}*/

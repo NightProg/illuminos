@@ -6,132 +6,87 @@ use spin::{Mutex, RwLock};
 
 use crate::drivers::disk;
 use crate::drivers::disk::Disk;
-use crate::drivers::keyboard::KeyboardStream;
-use crate::fs;
-use crate::graphic::font::{Psf2Font, PsfFont, FONT_DEFAULT};
-use crate::graphic::framebuffer::{FrameBuffer, RawFrameBuffer, SwapBuffer};
+use crate::drivers::keyboard::{KEYBOARD, KeyboardStream};
+use crate::fs::device::DevFs;
+use crate::fs::device::tty::TtyInode;
 use crate::graphic::Color;
-use crate::io::port::{new_port, Fd};
+use crate::graphic::font::{FONT_DEFAULT, Psf2Font, PsfFont};
+use crate::graphic::framebuffer::RawFrameBuffer;
+use crate::sync::mutex::TimeoutMutex;
+use crate::tty::session::Sessions;
+use crate::{fs, println_serial};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::marker::PhantomData;
 use pc_keyboard::KeyEvent;
 
-type ContextFramebuffer = RawFrameBuffer;
-
-pub static mut GLOBAL_CONTEXT: Context<ContextFramebuffer> = Context::none();
-
-pub fn init_global_context(framebuffer: ContextFramebuffer) {
-    unsafe {
-        GLOBAL_CONTEXT.framebuffer = Some(Box::new(framebuffer));
-    }
+lazy_static! {
+    pub static ref GLOBAL_CONTEXT: Context = Context::none();
+}
+pub fn init_global_context(framebuffer: RawFrameBuffer) {
+    *GLOBAL_CONTEXT.framebuffer.lock() = framebuffer;
 }
 
-pub fn app_ready() {
-    unsafe {
-        GLOBAL_CONTEXT.is_app_initialized = true;
-    }
+pub struct Context {
+    pub framebuffer: Arc<TimeoutMutex<RawFrameBuffer>>,
+    pub keyboard_stream: Mutex<KeyboardStream>,
+    pub fs: Mutex<fs::VFS>,
+    pub sessions: spin::RwLock<Sessions>,
 }
 
-#[derive(Clone)]
-pub struct Context<F: FrameBuffer> {
-    pub framebuffer: Option<Box<F>>,
-    pub is_app_initialized: bool,
-    pub keyboard_stream: KeyboardStream,
-    pub fs: fs::VFS,
-    pub open_files: alloc::collections::BTreeMap<usize, crate::io::port::Descriptor>,
-}
-
-impl<F: FrameBuffer> core::fmt::Debug for Context<F> {
+impl core::fmt::Debug for Context {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Context")
-            .field("is_app_initialized", &self.is_app_initialized)
-            .finish()
+        f.debug_struct("Context").finish()
     }
 }
 
-impl<F: FrameBuffer> Context<F> {
-    pub const fn none() -> Self {
+impl Context {
+    pub fn none() -> Self {
         Self {
-            framebuffer: None,
-            is_app_initialized: false,
-            keyboard_stream: KeyboardStream::new(),
-            fs: fs::VFS::new(),
-            open_files: alloc::collections::BTreeMap::new(),
+            framebuffer: Arc::new(TimeoutMutex::new(RawFrameBuffer::none())),
+            keyboard_stream: Mutex::new(KeyboardStream::new()),
+            fs: Mutex::new(fs::VFS::new()),
+            sessions: RwLock::new(Sessions::new()),
         }
     }
 
-    pub fn init_vfs(&mut self, disks: Vec<Disk>) {
-        self.fs.mounts.push(fs::Mount {
+    pub fn init_vfs(&self, disks: Vec<Disk>) {
+        let mut fs_lock = self.fs.lock();
+        fs_lock.mounts.push(fs::Mount {
             fs: Arc::new(Mutex::new(fs::ramfs::RamFs::new())),
             path: "/".to_string(),
         });
 
-        self.fs.mkdir("/disk");
-        self.fs.mkdir("/mnt");
-        self.fs.mounts.push(fs::Mount {
+        let fb = self.framebuffer.lock();
+
+        let mut devfs = DevFs::new();
+        devfs.add_device("fb0", fs::device::fb::FramebufferInode::new(*fb));
+        devfs.add_device("null", fs::device::null::NullInode);
+        devfs.add_device("tty", TtyInode);
+
+        fs_lock.mkdir("/disk");
+        fs_lock.mkdir("/mnt");
+        fs_lock.mkdir("/dev");
+        fs_lock.mounts.push(fs::Mount {
             fs: Arc::new(Mutex::new(fs::diskfs::DiskFs { disks })),
             path: "/disk".to_string(),
         });
+        fs_lock.mounts.push(fs::Mount {
+            fs: Arc::new(Mutex::new(devfs)),
+            path: "/dev".to_string(),
+        });
     }
 
-    pub fn is_framebuffer_initialized(&self) -> bool {
-        self.framebuffer.is_some()
+    pub fn add_key(&self, key: KeyEvent) {
+        println_serial!("key: {:?}", key);
+
+        self.sessions.read().current().tty.add_key(key.clone());
+
+        self.keyboard_stream.lock().push_key(key);
     }
 
-    pub fn open(&mut self, path: &str, flags: crate::fs::OpenFlags) -> crate::fs::Result<Fd> {
-        let file = self.fs.open_file(path, flags)?;
-        let fd = Fd::new();
-        self.open_files.insert(
-            fd.0,
-            crate::io::port::Descriptor::File(Arc::new(Mutex::new(file))),
-        );
-        Ok(fd)
-    }
-
-    pub fn create_port_text_buffer(&'static mut self, fg: Color, bg: Color) -> Option<Fd> {
-        if let Some(framebuffer) = self.framebuffer.as_mut() {
-            let font = &*FONT_DEFAULT;
-            let mut text_buffer =
-                crate::graphic::text_buffer::TextBuffer::new(&mut **framebuffer, font, fg, bg);
-            let port = new_port(
-                move || Vec::new(),
-                move |data: &[u8]| {
-                    for &b in data {
-                        text_buffer.put_char(b as char);
-                    }
-                },
-            );
-            Some(port)
-        } else {
-            None
-        }
-    }
-
-    pub fn add_key(&mut self, key: KeyEvent) {
-        self.keyboard_stream.push_key(key);
-    }
-
-    pub fn pop_key(&mut self) -> Option<KeyEvent> {
-        self.keyboard_stream.pop()
-    }
-
-    pub fn is_app_initialized(&self) -> bool {
-        self.is_app_initialized && self.is_framebuffer_initialized()
-    }
-
-    pub fn map_framebuffer<Func: FnOnce(&mut F)>(&mut self, f: Func) {
-        if let Some(framebuffer) = self.framebuffer.as_mut() {
-            f(framebuffer);
-        }
-    }
-
-    pub fn framebuffer(&self) -> &F {
-        self.framebuffer.as_ref().unwrap()
-    }
-
-    pub fn framebuffer_mut(&mut self) -> &mut F {
-        self.framebuffer.as_mut().unwrap()
+    pub fn pop_key(&self) -> Option<KeyEvent> {
+        self.keyboard_stream.lock().pop()
     }
 }

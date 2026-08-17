@@ -1,11 +1,12 @@
 use x86_64::instructions::port::Port;
 
 pub mod pci;
+pub mod pipe;
 pub mod port;
 pub mod ps2;
 pub mod serial;
-pub mod stdout;
 pub mod stdin;
+pub mod stdout;
 pub mod virtio;
 
 pub fn outb(port: u16, value: u8) {

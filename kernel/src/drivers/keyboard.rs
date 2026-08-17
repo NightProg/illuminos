@@ -2,13 +2,16 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
-use pc_keyboard::{layouts, HandleControl, KeyEvent, Keyboard, ScancodeSet1, ScancodeSet2};
+use pc_keyboard::{HandleControl, KeyEvent, Keyboard, ScancodeSet1, ScancodeSet2, layouts};
 use spin::Mutex;
+
+use crate::sync::mutex::TimeoutMutex;
 
 pub static mut KEYBOARD_STREAM: Mutex<KeyboardStream> = Mutex::new(KeyboardStream::new());
 
-pub static mut KEYBOARD: Keyboard<layouts::Azerty, ScancodeSet1> =
-    Keyboard::new(ScancodeSet1::new(), layouts::Azerty, HandleControl::Ignore);
+pub static KEYBOARD: TimeoutMutex<Keyboard<layouts::Azerty, ScancodeSet1>> = TimeoutMutex::new(
+    Keyboard::new(ScancodeSet1::new(), layouts::Azerty, HandleControl::Ignore),
+);
 
 #[derive(Clone)]
 pub struct KeyboardStream {
@@ -47,10 +50,6 @@ impl KeyboardStream {
         }
         self.keys.push_back(key.clone());
         self.have_changed = true;
-
-        for callback in &self.callback {
-            callback(&key);
-        }
     }
 
     pub fn handled_keys(&mut self) {

@@ -10,12 +10,21 @@ members = [
 
 ]
 
+
+
 [dependencies]
 ovmf-prebuilt = "0.2.3"
 
 [build-dependencies]
 illuminos_kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
-bootloader = { version = "0.11", default-features = false, features = ["uefi"] }
+
+[profile.dev]
+panic = "abort"
+
+
+[profile.release]
+panic = "abort"
+
 
 [patch.crates-io]
 illfs = { path = "../illfs" }

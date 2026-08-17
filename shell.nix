@@ -2,9 +2,6 @@
 pkgs.mkShell {
 	packages = with pkgs; [
 		nasm
+		libisoburn
 	];
-	
-	shellHook = ''
-		export RUSTUP_PREFIX="${pkgs.rustup}"
-	'';
 }

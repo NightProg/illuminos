@@ -1,18 +1,20 @@
+use crate::allocator::vma::VMA;
 use crate::drivers::disk::Disk;
-use crate::fs::{DirectoryInode, FileSystem, InodeKind, OpenFile};
+use crate::fs::{DirectoryInode, FileSystem, IOCtlRequest, InodeKind, OpenFile};
 use crate::println;
 use alloc::boxed::Box;
-use alloc::format;
+use alloc::{format, vec};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::PartialEq;
-use illfs::inode::Directory;
 use illfs::InOutDevice;
+use illfs::inode::Directory;
 use spin::Mutex;
 
 pub struct IllFS(pub Arc<Mutex<illfs::IllFs<OpenFile>>>);
 
+#[derive(Clone)]
 pub struct IllInode {
     fs: Arc<Mutex<illfs::IllFs<OpenFile>>>,
     inode_id: usize,
@@ -41,6 +43,14 @@ impl super::Inode for IllInode {
             .sync()
             .map_err(|_| "Failed to sync inode data")?;
         Ok(written)
+    }
+
+    fn inner_as_any(&mut self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn inner_as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
     }
 
     fn size(&mut self) -> u64 {
@@ -74,6 +84,21 @@ impl super::Inode for IllInode {
             None
         }
     }
+
+    fn mmap(&mut self, vma: &mut VMA) -> super::Result<()> {
+        let size = self.size();
+        let mut data = vec![0; size as usize];
+        self.read_at(0, &mut data)?;
+        vma.file = Some(Arc::new(Mutex::new(crate::fs::ramfs::RamFile { data })));
+        Ok(())
+    }
+
+    fn ioctl(&mut self, request: u64, arg: u64) -> crate::fs::Result<u64> {
+        let ioctl_req = IOCtlRequest::try_from(request)?;
+        match ioctl_req {
+            IOCtlRequest::GetSizeOf => Ok(self.size()),
+        }
+    }
 }
 
 pub struct IllDir {
@@ -93,6 +118,14 @@ impl super::Inode for IllDir {
 
     fn size(&mut self) -> u64 {
         0
+    }
+
+    fn inner_as_any(&mut self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn inner_as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
     }
 
     fn kind(&self) -> InodeKind {

@@ -1,9 +1,11 @@
 pub mod memory;
 pub mod paging;
 pub mod process_paging;
+pub mod vma;
+pub mod mmap;
+
 use core::ops::{Deref, DerefMut};
 
-// 0: its a memory size in octets
 #[derive(Debug, Clone, Copy)]
 pub struct MemSize(u64);
 

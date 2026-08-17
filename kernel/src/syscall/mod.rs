@@ -1,17 +1,31 @@
+mod file;
+mod mem;
+mod signal;
+mod task;
+use crate::allocator::mmap;
+use crate::allocator::vma::MapFlags;
+use crate::allocator::vma::ProtFlags;
 use crate::context::GLOBAL_CONTEXT;
+use crate::dbg;
 use crate::drivers::disk;
 use crate::fs::FileSystem;
 use crate::gdt::GDT;
-use crate::io::port::Fd;
+
 use crate::io::stdin;
 use crate::io::stdout;
 use crate::thread::SCHEDULER;
+use crate::thread::TaskState;
 use crate::thread::process;
+use crate::thread::process::PROCESSES;
+use crate::thread::process::ProcessArguments;
+use crate::thread::process::current_process;
+use crate::thread::schedule;
 use crate::thread::signal::Signal;
 use crate::{error, fs};
 use crate::{info, println_serial};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::arch::global_asm;
@@ -32,45 +46,209 @@ pub const SYS_SIGNAL: u64 = 8;
 pub const SYS_RAISE: u64 = 9;
 pub const SYS_FORK: u64 = 10;
 pub const SYS_GETPID: u64 = 11;
+pub const SYS_WAITPID: u64 = 12;
+pub const SYS_MMAP: u64 = 13;
+pub const SYS_PIPE: u64 = 14;
+pub const SYS_DUP2: u64 = 15;
+pub const SYS_EXECVE: u64 = 16;
+pub const SYS_CLOSE: u64 = 17;
+pub const SYS_MUNMAP: u64 = 18;
+pub const SYS_EXIT_GROUP: u64 = 19;
+pub const SYS_MPROTECT: u64 = 20;
+pub const SYS_BRK: u64 = 21;
+pub const SYS_IOCTL: u64 = 22;
+pub const SYS_SLEEP: u64 = 23;
+pub const SYS_THREAD_CREATE: u64 = 24; 
 
-pub static mut CURRENT_DISK_ID: usize = 0;
-pub static SYS_CONF: SysConf = SysConf::new();
 
-pub struct SysConf {
-    pub disk_kind_used: disk::DiskKind,
-    pub ext2_used: bool,
+pub static SYSCALL_TABLE: spin::Once<SyscallTable> = spin::Once::new();
+
+#[derive(Debug)]
+pub enum SyscallError {
+    InvalidSyscall,
+    InvalidFileDescriptor,
+    FileReadError,
+    FileWriteError,
+    FileOpenError,
+    PipeCreationFailed,
+    ProcessCreationFailed,
+    ProcessNotFound,
+    NotCurrentProcess,
+    MmapFailed,
+    MunmapFailed,
+    MprotectFailed,
+    BrkFailed,
+    IoctlFailed,
+    ForkFailed,
+    ExecveFailed,
+    SignalError,
+    SleepError(String),
+    UnknownError,
 }
 
-impl SysConf {
-    pub const fn new() -> Self {
+pub type SyscallResult = Result<Option<u64>, SyscallError>;
+pub type SyscallHandler = fn(&mut SyscallCtx) -> SyscallResult;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyscallKind {
+    Exit,
+    Read,
+    Write,
+    OpenFile,
+    Yield,
+    FbInfo,
+    FbMmap,
+    FbSwap,
+    Signal,
+    Raise,
+    Fork,
+    GetPid,
+    WaitPid,
+    Mmap,
+    Pipe,
+    Dup2,
+    Execve,
+    Close,
+    Munmap,
+    ExitGroup,
+    Mprotect,
+    Brk,
+    Ioctl,
+    Sleep,
+    ThreadCreate,
+}
+
+impl SyscallKind {
+    pub fn from_u64(value: u64) -> Option<Self> {
+        Some(match value {
+            SYS_EXIT => SyscallKind::Exit,
+            SYS_READ => SyscallKind::Read,
+            SYS_WRITE => SyscallKind::Write,
+            SYS_OPENF => SyscallKind::OpenFile,
+            SYS_YIELD => SyscallKind::Yield,
+            SYS_FB_INFO => SyscallKind::FbInfo,
+            SYS_FB_MMAP => SyscallKind::FbMmap,
+            SYS_FB_SWAP => SyscallKind::FbSwap,
+            SYS_SIGNAL => SyscallKind::Signal,
+            SYS_RAISE => SyscallKind::Raise,
+            SYS_FORK => SyscallKind::Fork,
+            SYS_GETPID => SyscallKind::GetPid,
+            SYS_WAITPID => SyscallKind::WaitPid,
+            SYS_MMAP => SyscallKind::Mmap,
+            SYS_PIPE => SyscallKind::Pipe,
+            SYS_DUP2 => SyscallKind::Dup2,
+            SYS_EXECVE => SyscallKind::Execve,
+            SYS_CLOSE => SyscallKind::Close,
+            SYS_MUNMAP => SyscallKind::Munmap,
+            SYS_EXIT_GROUP => SyscallKind::ExitGroup,
+            SYS_MPROTECT => SyscallKind::Mprotect,
+            SYS_BRK => SyscallKind::Brk,
+            SYS_IOCTL => SyscallKind::Ioctl,
+            SYS_SLEEP => SyscallKind::Sleep,
+            SYS_THREAD_CREATE => SyscallKind::ThreadCreate,
+            _ => return None,
+        })
+    }
+}
+
+pub struct Syscall {
+    pub kind: SyscallKind,
+    pub handler: SyscallHandler,
+}
+
+pub struct SyscallTable {
+    pub syscalls: Vec<Syscall>,
+}
+
+impl SyscallTable {
+    pub const fn new() -> SyscallTable {
         Self {
-            disk_kind_used: disk::DiskKind::AtaPio,
-            ext2_used: true,
+            syscalls: Vec::new(),
         }
+    }
+
+    pub fn register(&mut self, kind: SyscallKind, handler: SyscallHandler) -> &mut Self {
+        self.syscalls.push(Syscall { kind, handler });
+        self
+    }
+
+    pub fn handle_syscall(&self, ctx: &mut SyscallCtx) -> SyscallResult {
+        let syscall_kind =
+            SyscallKind::from_u64(ctx.syscall_id).ok_or(SyscallError::InvalidSyscall)?;
+        let syscall = self
+            .syscalls
+            .iter()
+            .find(|s| s.kind == syscall_kind)
+            .ok_or(SyscallError::InvalidSyscall)?;
+        (syscall.handler)(ctx)
     }
 }
 
 #[repr(C)]
 #[derive(Debug)]
 pub struct SyscallCtx {
-    pub syscall_id: u64, // rax    - offset 0x00
-    pub rip: u64,        // rcx    - offset 0x08 (sauvé par syscall)
-    pub rflags: u64,     // r11    - offset 0x10 (sauvé par syscall)
-    pub rdx: u64,        //        - offset 0x18
-    pub rsi: u64,        //        - offset 0x20
-    pub rdi: u64,        //        - offset 0x28
-    pub r8: u64,         //        - offset 0x30
-    pub r9: u64,         //        - offset 0x38
-    pub r10: u64,        //        - offset 0x40
-    pub rbx: u64,        //        - offset 0x48
-    pub rbp: u64,        //        - offset 0x50
-    pub r12: u64,        //        - offset 0x58
-    pub r13: u64,        //        - offset 0x60
-    pub r14: u64,        //        - offset 0x68
-    pub r15: u64,        //        - offset 0x70
-    pub rsp: u64,        //        - offset 0x78
+    pub syscall_id: u64,
+    pub rip: u64,
+    pub rflags: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub r8: u64,  //        - offset 0x30
+    pub r9: u64,  //        - offset 0x38
+    pub r10: u64, //        - offset 0x40
+    pub rbx: u64, //        - offset 0x48
+    pub rbp: u64, //        - offset 0x50
+    pub r12: u64, //        - offset 0x58
+    pub r13: u64, //        - offset 0x60
+    pub r14: u64, //        - offset 0x68
+    pub r15: u64, //        - offset 0x70
+    pub rsp: u64, //        - offset 0x78
 }
 pub fn init_syscall() {
+    SYSCALL_TABLE.call_once(|| {
+        let mut syscall_table = SyscallTable::new();
+        syscall_table
+            .register(SyscallKind::Exit, |ctx| {
+                let exit_code = ctx.rdi as u8;
+                crate::thread::exit(exit_code);
+                Ok(None)
+            })
+            .register(SyscallKind::ExitGroup, |ctx| {
+                let exit_code = ctx.rdi as u8;
+                crate::thread::exit_group(exit_code);
+                Ok(None)
+            })
+            .register(SyscallKind::Yield, |_| {
+                crate::thread::yield_now();
+                Ok(None)
+            })
+            .register(SyscallKind::Read, file::sys_read_impl)
+            .register(SyscallKind::Write, file::sys_write_impl)
+            .register(SyscallKind::OpenFile, file::sys_openf_impl)
+            .register(SyscallKind::Close, file::sys_close_impl)
+            .register(SyscallKind::Dup2, file::sys_dup2_impl)
+            .register(SyscallKind::Ioctl, file::sys_ioctl_impl)
+            .register(SyscallKind::Pipe, file::sys_pipe_impl)
+            .register(SyscallKind::GetPid, |ctx| {
+                let pid = current_process().unwrap().pid;
+                Ok(Some(pid as u64))
+            })
+            .register(SyscallKind::Fork, task::sys_fork_impl)
+            .register(SyscallKind::WaitPid, |ctx| {
+                let pid = ctx.rdi;
+                process::wait(pid);
+                Ok(None)
+            })
+            .register(SyscallKind::Execve, task::sys_execve_impl)
+            .register(SyscallKind::Mmap, mem::sys_mmap_impl)
+            .register(SyscallKind::Munmap, mem::sys_munmap_impl)
+            .register(SyscallKind::Mprotect, mem::sys_mprotect_impl)
+            .register(SyscallKind::Brk, mem::sys_brk_impl)
+            .register(SyscallKind::Signal, signal::sys_signal_impl)
+            .register(SyscallKind::Raise, signal::sys_raise_impl)
+            .register(SyscallKind::Sleep, task::sys_sleep_impl);
+        syscall_table
+    });
     let mut efer = Efer::read();
 
     efer.insert(EferFlags::SYSTEM_CALL_EXTENSIONS | EferFlags::NO_EXECUTE_ENABLE);
@@ -84,8 +262,6 @@ pub fn init_syscall() {
 
     let sys_handler_addr = sys_handler as u64;
 
-    println_serial!("{:X?}", sys_handler_addr);
-
     unsafe {
         lstar.write(sys_handler_addr);
         star.write(0x0013000800000000u64);
@@ -96,190 +272,18 @@ pub fn init_syscall() {
 #[unsafe(no_mangle)]
 extern "C" fn sys_dispatch(sys_ctx: *mut SyscallCtx) {
     let mut ctx = unsafe { &mut *sys_ctx };
-    crate::println_serial!(
-        "sys_dispatch syscall_id={} rip={:#x} rsp={:#x}",
-        ctx.syscall_id,
-        ctx.rip,
-        ctx.rsp
-    );
+    let res = SYSCALL_TABLE.r#try().unwrap().handle_syscall(ctx);
+    if let Err(ref e) = res {
+        error!("Syscall error: {:?}", e);
+        ctx.r9 = SYS_ERR;
+    }
+    if let Ok(Some(ret)) = res {
+        ctx.r9 = ret;
+    }
 
-    //x86_64::instructions::interrupts::enable();
-
-    match ctx.syscall_id {
-        SYS_EXIT => {
-            crate::thread::exit();
-        }
-        SYS_YIELD => {
-            crate::thread::yield_now();
-        }
-        SYS_READ => {
-            let fd = ctx.rdi;
-            let mut buf = ctx.rsi as *mut u8;
-            let mut buf_len = ctx.rdx;
-            let slice = unsafe { core::slice::from_raw_parts_mut(buf, buf_len as usize) };
-            if fd == 0 {
-                stdin::blocking_read(slice);
-            } else {
-                let fd = Fd(fd as usize);
-                let buf = fd.read();
-                if let Some(x) = buf {
-                    slice.copy_from_slice(&x);
-                } else {
-                    ctx.r9 = SYS_ERR;
-                }
-            }
-        }
-        SYS_WRITE => {
-            let fd = ctx.rdi;
-            let buf = ctx.rsi as *const u8;
-            let buf_len = ctx.rdx;
-            let slice = unsafe { core::slice::from_raw_parts(buf, buf_len as usize) };
-
-            if fd == 1 {
-                println_serial!("WRITTING : {}", str::from_utf8(slice).unwrap());
-                stdout::write(slice);
-            } else {
-                let fd = Fd(fd as usize);
-
-                fd.write(slice);
-            }
-        }
-
-        SYS_OPENF => {
-            let addr = unsafe { ctx.rdi as *mut i8 };
-
-            let fd_addr = unsafe { ctx.rsi as *mut u64 };
-
-            let flags = fs::OpenFlags::from_bits(ctx.rdx);
-
-            if flags.is_none() {
-                ctx.r9 = SYS_ERR;
-                info!("Can't parse flags");
-                return;
-            }
-            let flags = flags.unwrap();
-
-            let cstr = unsafe { core::ffi::CStr::from_ptr(addr) };
-            let string = cstr.to_string_lossy().to_string();
-            let mut file = unsafe {
-                GLOBAL_CONTEXT.open(&string, flags).unwrap_or_else(|_| {
-                    ctx.r9 = SYS_ERR;
-                    error!("Failed to open file");
-                    Fd(0xFFFFFFFF)
-                })
-            };
-
-            unsafe {
-                *fd_addr = file.0 as u64;
-            }
-        }
-
-        SYS_SIGNAL => {
-            let signum = ctx.rdi;
-            let handler = ctx.rsi;
-            info!(
-                "Register signal handler: signum={}, handler={:X}",
-                signum, handler
-            );
-            let sig = Signal::from_u64(signum);
-            if sig.is_none() {
-                ctx.r9 = SYS_ERR;
-                return;
-            }
-            let sig = sig.unwrap();
-
-            info!("Parsed signal: {:?}", sig);
-            let mut scheduler = crate::thread::SCHEDULER.lock();
-            if let Some(task) = scheduler.current_task_mut() {
-                if signum < 32 {
-                    info!(
-                        "Registering handler for signal {:?} at {:X} for task {}",
-                        sig, handler, task.id
-                    );
-                    task.signals.handlers[signum as usize] = handler;
-                } else {
-                    ctx.r9 = SYS_ERR;
-                }
-            }
-        }
-
-        SYS_RAISE => {
-            let target_pid = ctx.rdi as usize;
-            let signum = ctx.rsi;
-
-            let sig = Signal::from_u64(signum);
-            if sig.is_none() {
-                ctx.r9 = SYS_ERR;
-                return;
-            }
-
-            let mut scheduler = crate::thread::SCHEDULER.lock();
-            let task = scheduler
-                .tasks
-                .iter_mut()
-                .map(|kv| kv.1)
-                .find(|t| t.id == target_pid);
-
-            match task {
-                Some(t) => t.signals.send(sig.unwrap()),
-                None => ctx.r9 = 0xFF,
-            }
-        }
-
-        SYS_GETPID => {
-            let pid_ptr = ctx.rdi as *mut u64;
-            let scheduler = crate::thread::SCHEDULER.lock();
-            if let Some(task) = scheduler.current_task() {
-                unsafe {
-                    *pid_ptr = task.parent;
-                }
-                ctx.r9 = 0;
-            } else {
-                ctx.r9 = SYS_ERR;
-            }
-        }
-
-        SYS_FB_INFO => {
-            let info_ptr = ctx.rdi as *mut info::FrameBufferInfo;
-            unsafe {
-                if let Some(fb) = GLOBAL_CONTEXT.framebuffer.as_ref() {
-                    *info_ptr = fb.info();
-                } else {
-                    ctx.r9 = SYS_ERR;
-                }
-            }
-        }
-
-        SYS_FB_MMAP => {
-            let addr_ptr = ctx.rdi as *mut u64;
-            unsafe {
-                if let Some(fb) = GLOBAL_CONTEXT.framebuffer.as_ref() {
-                    *addr_ptr = fb.buffer().as_ptr() as u64;
-                } else {
-                    ctx.r9 = SYS_ERR;
-                }
-            }
-        }
-
-        SYS_FB_SWAP => {
-            ctx.r9 = SYS_ERR;
-        }
-
-        SYS_FORK => {
-            let current = SCHEDULER.lock().current;
-            let new_pid = process::fork(current, ctx);
-            crate::debug!("NEW PID : {:?}", new_pid);
-            if let Some(pid) = new_pid {
-                ctx.r9 = 0;
-                ctx.syscall_id = pid;
-            } else {
-                ctx.r9 = SYS_ERR;
-            }
-        }
-
-        e => {
-            println_serial!("{}", e);
-        }
+    if SCHEDULER.lock().current_task().unwrap().state != TaskState::Ready {
+        println_serial!("schedule");
+        schedule();
     }
 
     x86_64::instructions::interrupts::disable();

@@ -1,9 +1,9 @@
+use crate::fs::{DirectoryInode, FileSystem, Inode};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
-use crate::fs::{DirectoryInode, FileSystem, Inode};
 
 pub struct RamFile {
     pub data: Vec<u8>,
@@ -31,6 +31,14 @@ impl Inode for RamFile {
         Ok(buf.len())
     }
 
+    fn inner_as_any(&mut self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn inner_as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+
     fn size(&mut self) -> u64 {
         self.data.len() as u64
     }
@@ -39,7 +47,6 @@ impl Inode for RamFile {
         crate::fs::InodeKind::File
     }
 }
-
 
 pub struct RamDir {
     pub children: Mutex<BTreeMap<String, Arc<Mutex<dyn Inode>>>>,
@@ -65,20 +72,35 @@ impl Inode for RamDir {
     fn as_directory(&mut self) -> Option<&dyn DirectoryInode> {
         Some(self)
     }
+
+    fn inner_as_any(&mut self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn inner_as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
 }
 
 impl DirectoryInode for RamDir {
     fn lookup(&self, name: &str) -> crate::fs::Result<Arc<Mutex<dyn Inode>>> {
-        self.children.lock().get(name).cloned().ok_or("Entry not found".to_string())
+        self.children
+            .lock()
+            .get(name)
+            .cloned()
+            .ok_or("Entry not found".to_string())
     }
 
     fn mkdir(&self, name: &str) -> crate::fs::Result<()> {
         if self.children.lock().contains_key(name) {
             return Err("Directory already exists".to_string());
         }
-        self.children.lock().insert(name.to_string(), Arc::new(Mutex::new(RamDir {
-            children: Mutex::new(BTreeMap::new()),
-        })));
+        self.children.lock().insert(
+            name.to_string(),
+            Arc::new(Mutex::new(RamDir {
+                children: Mutex::new(BTreeMap::new()),
+            })),
+        );
         Ok(())
     }
 
@@ -86,9 +108,10 @@ impl DirectoryInode for RamDir {
         if self.children.lock().contains_key(name) {
             return Err("File already exists".to_string());
         }
-        self.children.lock().insert(name.to_string(), Arc::new(Mutex::new(RamFile {
-            data: Vec::new(),
-        })));
+        self.children.lock().insert(
+            name.to_string(),
+            Arc::new(Mutex::new(RamFile { data: Vec::new() })),
+        );
         Ok(())
     }
 
@@ -113,7 +136,6 @@ impl RamFs {
     pub fn root(&self) -> Arc<Mutex<dyn Inode>> {
         self.root.clone()
     }
-
 }
 
 impl FileSystem for RamFs {

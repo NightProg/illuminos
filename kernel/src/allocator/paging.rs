@@ -1,8 +1,7 @@
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use alloc::vec::Vec;
-use bootloader_api::{
-    BootInfo,
-    info::{MemoryRegion, MemoryRegionKind, MemoryRegions},
-};
+
 use x86_64::{
     PhysAddr, VirtAddr,
     structures::paging::{
@@ -11,42 +10,61 @@ use x86_64::{
     },
 };
 
-use crate::info;
-use crate::math;
+use crate::{allocator::memory::HEAP_READY, info};
+use crate::{math, sync::mutex::TimeoutMutex};
 use spin::Mutex;
 use x86_64::registers::model_specific::Msr;
 
 pub static KERNEL_CR3: Mutex<Option<PageTable>> = Mutex::new(None);
 pub static KERNEL_CR3_FRAME: Mutex<Option<PhysFrame>> = Mutex::new(None);
 
-pub static KERNEL_PAGING_MANAGER: Mutex<Option<PagingManager>> = Mutex::new(None);
+pub static KERNEL_PAGING_MANAGER: TimeoutMutex<Option<PagingManager>> = TimeoutMutex::new(None);
 
-pub fn get_physical_memory_offset(boot_info: &BootInfo) -> VirtAddr {
-    let memory_regions = boot_info.memory_regions.iter();
-    let usable_regions = memory_regions.filter(|r| r.kind == MemoryRegionKind::Usable);
-    let addr_ranges = usable_regions.map(|r| r.start..r.end);
-    let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
-    let mut min_addr = u64::MAX;
-    for addr in frame_addresses {
-        if addr < min_addr {
-            min_addr = addr;
-        }
-    }
-    if min_addr == u64::MAX {
-        panic!("No usable memory regions found");
-    }
-    let phys_mem_offset = PhysAddr::new(min_addr);
-
-    VirtAddr::new(phys_mem_offset.as_u64())
+pub struct FrameInfo {
+    refcount: AtomicUsize,
 }
 
-pub unsafe fn init_paging(boot_info: &BootInfo) -> OffsetPageTable<'static> {
-    let phys_mem_offset = VirtAddr::new(
-        boot_info
-            .physical_memory_offset
-            .into_option()
-            .expect("No physical memory offset found"),
-    );
+pub static FRAME_INFO: Mutex<Vec<FrameInfo>> = Mutex::new(Vec::new());
+
+#[inline]
+fn pfn(frame: &PhysFrame) -> usize {
+    frame.start_address().as_u64() as usize >> 12
+}
+
+pub fn frame_inc_refcount(frame: &PhysFrame) {
+    if !HEAP_READY.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Some(f) = FRAME_INFO.lock().get_mut(pfn(frame)) {
+        f.refcount.fetch_add(1, Ordering::Relaxed);
+    } else {
+        FRAME_INFO.lock().push(FrameInfo {
+            refcount: AtomicUsize::new(1),
+        });
+    }
+}
+
+pub fn frame_dec_refcount(frame: &PhysFrame) -> usize {
+    if let Some(f) = FRAME_INFO.lock().get_mut(pfn(frame)) {
+        if f.refcount.load(Ordering::SeqCst) == 0 {
+            return 0;
+        }
+        f.refcount.fetch_sub(1, Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+pub fn frame_refcount(frame: &PhysFrame) -> Option<usize> {
+    if let Some(f) = FRAME_INFO.lock().get(pfn(frame)) {
+        Some(f.refcount.load(Ordering::Relaxed))
+    } else {
+        None
+    }
+}
+
+pub unsafe fn init_paging(memoff: u64) -> OffsetPageTable<'static> {
+    let phys_mem_offset = VirtAddr::new(memoff);
     let level_4_table = unsafe { active_level_4_table(phys_mem_offset) };
 
     KERNEL_CR3.lock().insert(level_4_table.clone());
@@ -73,18 +91,28 @@ pub fn map_page(
     map_result.expect("map_to failed").flush();
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct KernelFrameAllocator<'a> {
-    memory_map: &'a [MemoryRegion],
+    memory_map: &'a [&'a limine::memmap::Entry],
     freeed_frame: Vec<PhysFrame>,
     use_free_frame: bool,
     next: usize,
 }
 
+impl core::fmt::Debug for KernelFrameAllocator<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("KernelFrameAllocator")
+            .field("freeed_frame", &self.freeed_frame)
+            .field("use_free_frame", &self.use_free_frame)
+            .field("next", &self.next)
+            .finish()
+    }
+}
+
 impl<'a> KernelFrameAllocator<'a> {
-    pub unsafe fn init(boot_info: &'a BootInfo) -> Self {
+    pub unsafe fn init(entries: &'a [&limine::memmap::Entry]) -> Self {
         KernelFrameAllocator {
-            memory_map: &boot_info.memory_regions,
+            memory_map: entries,
             freeed_frame: Vec::new(),
             use_free_frame: false,
             next: 0,
@@ -92,11 +120,11 @@ impl<'a> KernelFrameAllocator<'a> {
     }
 
     fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
-        let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r| r.kind == MemoryRegionKind::Usable);
-        let addr_ranges = usable_regions.map(|r| r.start..r.end);
-        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
-        frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
+        self.memory_map
+            .iter()
+            .filter(|r| r.type_ == limine::memmap::MEMMAP_USABLE)
+            .flat_map(|r| (r.base..(r.base + r.length)).step_by(4096))
+            .map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
 
     pub fn allocate_frames(&mut self, size: usize) -> Option<Vec<PhysFrame>> {
@@ -118,10 +146,9 @@ pub struct PagingManager<'p> {
 }
 
 impl<'p> PagingManager<'p> {
-    pub unsafe fn new(boot_info: &'p BootInfo) -> Self {
-        let mut boot_info = boot_info;
-        let mapper = unsafe { init_paging(boot_info) };
-        let frame_allocator = unsafe { KernelFrameAllocator::init(&mut boot_info) };
+    pub unsafe fn new(memoff: u64, entries: &'static [&limine::memmap::Entry]) -> Self {
+        let mapper = unsafe { init_paging(memoff) };
+        let frame_allocator = unsafe { KernelFrameAllocator::init(entries) };
         PagingManager {
             mapper,
             frame_allocator,
@@ -185,17 +212,20 @@ impl<'p> PagingManager<'p> {
 unsafe impl<'a> FrameAllocator<Size4KiB> for KernelFrameAllocator<'a> {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         if self.use_free_frame {
-            let frame = self.freeed_frame.get(self.next);
-            self.next += 1;
-            return frame.copied();
+            let frame = self.freeed_frame.pop().inspect(frame_inc_refcount);
+            return frame;
         } else {
-            let frame = self.usable_frames().nth(self.next);
+            let frame = self
+                .usable_frames()
+                .nth(self.next)
+                .inspect(frame_inc_refcount);
 
             if frame.is_none() {
                 self.use_free_frame = true;
                 return self.allocate_frame();
             }
             self.next += 1;
+
             frame
         }
     }
@@ -203,6 +233,7 @@ unsafe impl<'a> FrameAllocator<Size4KiB> for KernelFrameAllocator<'a> {
 
 impl<'a> FrameDeallocator<Size4KiB> for KernelFrameAllocator<'a> {
     unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        frame_dec_refcount(&frame);
         self.freeed_frame.push(frame);
     }
 }

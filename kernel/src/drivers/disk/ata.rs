@@ -215,7 +215,7 @@ impl super::DiskAction for AtaPio {
         AtaPio::detect_disks()
     }
 
-    fn read_sector(&mut self, sector: u64, out: &mut [u8])  {
+    fn read_sector(&mut self, sector: u64, out: &mut [u8]) {
         let mut buffer = [0; 512];
         self.read_sector8(sector as u32, &mut buffer);
         out.copy_from_slice(&buffer);
@@ -237,7 +237,6 @@ impl super::DiskAction for AtaPio {
         self.total_sectors as u64
     }
 }
-
 
 impl illfs::InOutDevice for AtaPio {
     fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
@@ -288,9 +287,10 @@ impl illfs::InOutDevice for AtaPio {
                 sector_size as usize - sector_offset,
             );
 
-            sector_buffer[sector_offset..sector_offset + bytes_to_copy]
-                .copy_from_slice(&buf[((sector - start_sector) * sector_size) as usize
-                    ..((sector - start_sector) * sector_size) as usize + bytes_to_copy]);
+            sector_buffer[sector_offset..sector_offset + bytes_to_copy].copy_from_slice(
+                &buf[((sector - start_sector) * sector_size) as usize
+                    ..((sector - start_sector) * sector_size) as usize + bytes_to_copy],
+            );
 
             self.write_sector8(sector as u32, &sector_buffer);
         }

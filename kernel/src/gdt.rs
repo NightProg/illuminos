@@ -1,9 +1,10 @@
 use core::sync::atomic::AtomicU64;
 
 use lazy_static::lazy_static;
+use x86_64::VirtAddr;
+use x86_64::registers::segmentation::SS;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
-use x86_64::VirtAddr;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const STACK_SIZE: usize = 4096 * 7;
@@ -43,7 +44,7 @@ pub struct GdtSelectors {
 }
 
 pub unsafe fn init_gdt() {
-    use x86_64::instructions::segmentation::{Segment, CS, DS};
+    use x86_64::instructions::segmentation::{CS, DS, Segment};
     use x86_64::instructions::tables::load_tss;
     init_tss();
 
@@ -62,6 +63,7 @@ pub unsafe fn init_gdt() {
     unsafe {
         CS::set_reg(GDT.1.code_selector);
         DS::set_reg(GDT.1.data_selector);
+        SS::set_reg(GDT.1.data_selector);
         load_tss(GDT.1.tss_selector);
     }
 }

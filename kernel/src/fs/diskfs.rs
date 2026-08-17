@@ -29,6 +29,14 @@ impl Inode for DiskFsInode {
             .map_err(|_| "Failed to write to disk device inode")?;
         Ok(buf.len())
     }
+    
+    fn inner_as_any(&mut self) -> &dyn core::any::Any {
+        self
+    }
+    
+    fn inner_as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
 
     fn size(&mut self) -> u64 {
         self.fs.disks[self.disk_index].size()
@@ -60,6 +68,14 @@ impl Inode for DiskFsRoot {
 
     fn kind(&self) -> crate::fs::InodeKind {
         crate::fs::InodeKind::Directory
+    }
+    
+    fn inner_as_any(&mut self) -> &dyn core::any::Any {
+        self
+    }
+    
+    fn inner_as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
     }
 
     fn as_directory(&mut self) -> Option<&dyn DirectoryInode> {
